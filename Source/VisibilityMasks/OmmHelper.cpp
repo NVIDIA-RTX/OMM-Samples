@@ -23,8 +23,22 @@ namespace ommhelper
             nriResult |= (uint32_t)nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::HelperInterface), (nri::HelperInterface*)&NRI);
             nriResult |= (uint32_t)nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::RayTracingInterface), (nri::RayTracingInterface*)&NRI);
 
+            ommMessageInterface log;
+            log.userArg = nullptr;
+            log.messageCallback = [](ommMessageSeverity severity, const char* message, void*/* userArg*/)
+            {
+                const char* severityStr = "";
+                switch (severity) {
+                case ommMessageSeverity_Info: severityStr = "INFO"; break;
+                case ommMessageSeverity_PerfWarning: severityStr = "WARNING"; break;
+                case ommMessageSeverity_Error: severityStr = "ERROR"; break;
+                case ommMessageSeverity_Fatal: severityStr = "FATAL"; break;
+                default: severityStr = "UNKNOWN"; break;
+                }
+                printf("[OMM][%s]: %s\n", severityStr, message);
+            };
             ommBakerCreationDesc desc = ommBakerCreationDescDefault();
-            desc.enableValidation = false;
+			desc.messageInterface = log;
             desc.type = ommBakerType_CPU;
             if (ommCreateBaker(&desc, &m_OmmCpuBaker) != ommResult_SUCCESS)
             {
@@ -63,8 +77,10 @@ namespace ommhelper
         m_GpuBakerIntegration.Destroy();
         ommDestroyBaker(m_OmmCpuBaker);
         ReleaseGeometryMemory();
+#if !DXR_OMM
         if (NRI.GetDeviceDesc(*m_Device).graphicsAPI == nri::GraphicsAPI::D3D12)
             NvAPI_Unload();
+#endif
     }
 
 #pragma region [ Utils ]
@@ -83,8 +99,9 @@ namespace ommhelper
     {
         switch (format)
         {
-        case nri::Format::R16_UINT: return ommIndexFormat_I16_UINT;
-        case nri::Format::R32_UINT: return ommIndexFormat_I32_UINT;
+        case nri::Format::R8_UINT: return ommIndexFormat_UINT_8;
+        case nri::Format::R16_UINT: return ommIndexFormat_UINT_16;
+        case nri::Format::R32_UINT: return ommIndexFormat_UINT_32;
         default: printf("[FAIL] Unknown index format passed to Cpu Baker!\n"); std::abort();
         }
     }
@@ -114,8 +131,9 @@ namespace ommhelper
     {
         switch (format)
         {
-        case ommIndexFormat_I16_UINT: return nri::Format::R16_UINT;
-        case ommIndexFormat_I32_UINT: return nri::Format::R32_UINT;
+        case ommIndexFormat_UINT_8: return nri::Format::R8_UINT;
+        case ommIndexFormat_UINT_16: return nri::Format::R16_UINT;
+        case ommIndexFormat_UINT_32: return nri::Format::R32_UINT;
         default: printf("[FAIL] Unknown Index format returned from Cpu Baker!\n"); std::abort();
         }
     }
@@ -137,6 +155,24 @@ namespace ommhelper
         size_t stride = 0;
         if (NRI.GetDeviceDesc(*m_Device).graphicsAPI == nri::GraphicsAPI::D3D12)
         {
+#if DXR_OMM
+            stride = sizeof(D3D12_RAYTRACING_OPACITY_MICROMAP_HISTOGRAM_ENTRY);
+
+            size_t countsNum = bakerOutputBufferSize / sizeof(ommCpuOpacityMicromapUsageCount);
+            outSize = countsNum * stride;
+
+            if (!outFormattedBuffer)
+                return;
+
+            std::vector<D3D12_RAYTRACING_OPACITY_MICROMAP_HISTOGRAM_ENTRY> sanitizedUsageCounts;
+            ommCpuOpacityMicromapUsageCount* ommData = (ommCpuOpacityMicromapUsageCount*)bakerOutputBuffer;
+            for (size_t i = 0; i < countsNum; ++i)
+            {
+                D3D12_RAYTRACING_OPACITY_MICROMAP_HISTOGRAM_ENTRY usageDesc = { ommData[i].count, ommData[i].subdivisionLevel, (D3D12_RAYTRACING_OPACITY_MICROMAP_FORMAT)ommData[i].format };
+                sanitizedUsageCounts.push_back(usageDesc);
+            }
+            memcpy(outFormattedBuffer, sanitizedUsageCounts.data(), outSize);
+#else
             stride = sizeof(_NVAPI_D3D12_RAYTRACING_OPACITY_MICROMAP_USAGE_COUNT);
 
             size_t countsNum = bakerOutputBufferSize / sizeof(ommCpuOpacityMicromapUsageCount);
@@ -153,6 +189,7 @@ namespace ommhelper
                 sanitizedUsageCounts.push_back(usageDesc);
             }
             memcpy(outFormattedBuffer, sanitizedUsageCounts.data(), outSize);
+#endif
         }
         else
         {
@@ -207,7 +244,8 @@ namespace ommhelper
         result |= !cpuBakerFlags.enableSpecialIndices ? uint32_t(ommCpuBakeFlags_DisableSpecialIndices) : 0;
         result |= !cpuBakerFlags.enableDuplicateDetection ? uint32_t(ommCpuBakeFlags_DisableDuplicateDetection) : 0;
         result |= cpuBakerFlags.enableNearDuplicateDetection ? uint32_t(ommCpuBakeFlags_EnableNearDuplicateDetection) : 0;
-        result |= !cpuBakerFlags.force32bitIndices ? uint32_t(ommCpuBakeFlags_Force32BitIndices) : 0;
+        result |= cpuBakerFlags.force32bitIndices ? uint32_t(ommCpuBakeFlags_Force32BitIndices) : 0;
+		result |= cpuBakerFlags.allow8bitIndices ? uint32_t(ommCpuBakeFlags_Allow8BitIndices) : 0;
         return  ommCpuBakeFlags(result);
     }
 
@@ -306,7 +344,7 @@ namespace ommhelper
                 memcpy(instance.outData[(uint32_t)OmmDataLayout::IndexHistogram].data(), resDesc->indexHistogram, ommIndexHistogramSize);
                 instance.outIndexHistogramCount = resDesc->indexHistogramCount;
 
-                size_t stride = resDesc->indexFormat == ommIndexFormat_I16_UINT ? sizeof(uint16_t) : sizeof(uint32_t);
+                size_t stride = resDesc->indexFormat == ommIndexFormat_UINT_8 ? sizeof(uint8_t) : ommIndexFormat_UINT_16 ? sizeof(uint16_t) : sizeof(uint32_t);
                 size_t indexDataSize = resDesc->indexCount * stride;
                 instance.outOmmIndexFormat = GetNriIndexFormat(resDesc->indexFormat);
                 instance.outOmmIndexStride = (uint32_t)stride;
@@ -332,6 +370,7 @@ namespace ommhelper
         result |= bakeDesc.enableDebugMode ? uint32_t(BakerBakeFlags::EnableNsightDebugMode) : 0;
         result |= flags.force32bitIndices ? uint32_t(BakerBakeFlags::Force32BitIndices) : 0;
         result |= flags.computeOnlyWorkload ? uint32_t(BakerBakeFlags::ComputeOnly) : 0;
+        result |= flags.allow8bitIndices ? uint32_t(BakerBakeFlags::Allow8BitIndices) : 0;
         return BakerBakeFlags(result);
     }
 

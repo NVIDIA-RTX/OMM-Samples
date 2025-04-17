@@ -95,6 +95,7 @@ enum class BakerBakeFlags : uint32_t
     Force32BitIndices = (uint32_t)ommGpuBakeFlags_Force32BitIndices,
     ComputeOnly = (uint32_t)ommGpuBakeFlags_ComputeOnly,
     EnableNsightDebugMode = (uint32_t)ommGpuBakeFlags_EnableNsightDebugMode,
+    Allow8BitIndices = (uint32_t)ommGpuBakeFlags_Allow8BitIndices
 };
 
 struct BakerSettings

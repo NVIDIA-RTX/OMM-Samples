@@ -27,7 +27,6 @@ void OmmBakerGpuIntegration::Initialize(nri::Device& device)
     }
 
     ommBakerCreationDesc bakerCreationDesc = ommBakerCreationDescDefault();
-    bakerCreationDesc.enableValidation = true;
     bakerCreationDesc.type = ommBakerType_GPU;
     ommResult ommResult = ommCreateBaker(&bakerCreationDesc, &m_GpuBaker);
     if (ommResult != ommResult_SUCCESS)
@@ -78,8 +77,9 @@ ommIndexFormat GetOmmIndexFormat(nri::Format inFormat)
 {
     switch (inFormat)
     {
-    case nri::Format::R16_UINT: return ommIndexFormat_I16_UINT;
-    case nri::Format::R32_UINT: return ommIndexFormat_I32_UINT;
+    case nri::Format::R8_UINT: return ommIndexFormat_UINT_8;
+    case nri::Format::R16_UINT: return ommIndexFormat_UINT_16;
+    case nri::Format::R32_UINT: return ommIndexFormat_UINT_32;
     default: printf("[FAIL] Unsupported index format\n"); std::abort();
     }
 }
@@ -88,8 +88,9 @@ nri::Format GetNriIndexFormat(ommIndexFormat  inFormat)
 {
     switch (inFormat)
     {
-    case ommIndexFormat_I16_UINT : return nri::Format::R16_UINT;
-    case ommIndexFormat_I32_UINT : return nri::Format::R32_UINT;
+    case ommIndexFormat_UINT_8: return nri::Format::R8_UINT;
+    case ommIndexFormat_UINT_16: return nri::Format::R16_UINT;
+    case ommIndexFormat_UINT_32: return nri::Format::R32_UINT;
     default: printf("[FAIL] Unsupported index format\n"); std::abort();
     }
 }

@@ -914,6 +914,31 @@ bool Sample::Initialize(nri::GraphicsAPI graphicsAPI)
     NRI_ABORT_ON_FAILURE( NRI.CreateFence(*m_Device, 0, m_FrameFence) );
 
     const nri::DeviceDesc& deviceDesc = NRI.GetDeviceDesc(*m_Device);
+
+#ifdef DXR_OMM
+    if (deviceDesc.graphicsAPI == nri::GraphicsAPI::D3D12)
+    {
+        ID3D12Device* d3d12Device = (ID3D12Device*)NRI.GetDeviceNativeObject(*m_Device);
+        if (d3d12Device)
+        {
+            D3D12_FEATURE_DATA_D3D12_OPTIONS5 options5 = {};
+            HRESULT hr = d3d12Device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &options5, sizeof(options5));
+
+            if (SUCCEEDED(hr) && options5.RaytracingTier < D3D12_RAYTRACING_TIER_1_2)
+            {
+                const char* errorMessage =
+                    "DXR_OMM is enabled but your GPU does not support D3D12_RAYTRACING_TIER_1_2.\n\n"
+                    "D3D12_RAYTRACING_TIER_1_2 is required for Opacity Micromaps support.\n\n"
+                    "Please update GPU driver or disable DXR_OMM in CMakeLists.txt.\n\n"
+                    "Preview drivers can be downloaded from: https://developer.nvidia.com/downloads/shadermodel6-9-preview-driver";
+
+                MessageBoxA(nullptr, errorMessage, "DXR 1.2 Support Required", MB_OK | MB_ICONERROR);
+                NRI_ABORT_ON_FALSE(false);
+            }
+        }
+    }
+#endif
+
     m_ConstantBufferSize = helper::Align(sizeof(GlobalConstants), deviceDesc.constantBufferOffsetAlignment);
     m_RenderResolution = GetOutputResolution();
 
@@ -1922,7 +1947,7 @@ void Sample::InitializeOmmGeometryFromCache(const OmmBatch& batch, std::vector<o
                 data.data[j] = instance.outData[j].data();
             }
             ommhelper::OmmCaching::ReadMaskFromCache(GetOmmCacheFilename().c_str(), data, stateMask, hash, (uint16_t*)&instance.outOmmIndexFormat);
-            instance.outOmmIndexStride = instance.outOmmIndexFormat == nri::Format::R16_UINT ? sizeof(uint16_t) : sizeof(uint32_t);
+            instance.outOmmIndexStride = instance.outOmmIndexFormat == nri::Format::R8_UINT ? sizeof(uint8_t) : instance.outOmmIndexFormat == nri::Format::R16_UINT ? sizeof(uint16_t) : sizeof(uint32_t);
             instance.outDescArrayHistogramCount = uint32_t(data.sizes[(uint32_t)ommhelper::OmmDataLayout::DescArrayHistogram] / (uint64_t)sizeof(ommCpuOpacityMicromapUsageCount));
             instance.outIndexHistogramCount = uint32_t(data.sizes[(uint32_t)ommhelper::OmmDataLayout::IndexHistogram] / (uint64_t)sizeof(ommCpuOpacityMicromapUsageCount));
         }
@@ -2230,6 +2255,7 @@ bool IsRebuildAvailable(ommhelper::OmmBakeDesc& updated, ommhelper::OmmBakeDesc&
         result |= updated.gpuFlags.enableTexCoordDeduplication != current.gpuFlags.enableTexCoordDeduplication;
         result |= updated.gpuFlags.force32bitIndices != current.gpuFlags.force32bitIndices;
         result |= updated.gpuFlags.enableSpecialIndices != current.gpuFlags.enableSpecialIndices;
+        result |= updated.gpuFlags.allow8bitIndices != current.gpuFlags.allow8bitIndices;
     }
     else
     {
@@ -2239,6 +2265,7 @@ bool IsRebuildAvailable(ommhelper::OmmBakeDesc& updated, ommhelper::OmmBakeDesc&
         result |= updated.cpuFlags.enableDuplicateDetection != current.cpuFlags.enableDuplicateDetection;
         result |= updated.cpuFlags.enableNearDuplicateDetection != current.cpuFlags.enableNearDuplicateDetection;
         result |= updated.cpuFlags.force32bitIndices != current.cpuFlags.force32bitIndices;
+        result |= updated.cpuFlags.allow8bitIndices != current.cpuFlags.allow8bitIndices;
     }
 
     result |= ((current.enableCache == false) && updated.enableCache);
@@ -2259,6 +2286,24 @@ void Sample::AppendOmmImguiSettings()
     {
         if (isUnfolded)
         {
+            if (NRI.GetDeviceDesc(*m_Device).graphicsAPI == nri::GraphicsAPI::D3D12)
+            {
+#if DXR_OMM
+                ImGui::Text("API: DXR");
+                if (ImGui::BeginItemTooltip())
+                {
+                    ImGui::Text("OMMs are built using DXR 1.2 API");
+                    ImGui::EndTooltip();
+                }
+#else
+                ImGui::Text("API: NvAPI");
+                if (ImGui::BeginItemTooltip())
+                {
+                    ImGui::Text("OMMs are built using NvAPI");
+                    ImGui::EndTooltip();
+                }
+#endif
+            }
             ImGui::Checkbox("Enable OMMs", &m_EnableOmm);
             ImGui::SameLine();
             ImGui::Text("[Masked Geometry Num: %llu]", m_MaskedBlasses.size());

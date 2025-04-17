@@ -3,6 +3,7 @@
 *Opacity Micro-Map sample* demostrates usage of Opacity Micro-Maps in Raytracing. Sample details:
 - Opacity Micro-Map SDK is used for OMM baking. Both CPU baker and GPU baker are supported in the sample: https://github.com/NVIDIAGameWorks/Opacity-MicroMap-SDK
 - Rendering and Denoising are based on NRDSample: https://github.com/NVIDIAGameWorks/NRDSample
+- The sample primarily uses the DXR 1.2 API, with NvAPI available as a legacy fallback option.
 
 ## Build instructions
 
@@ -22,6 +23,8 @@
 - `DISABLE_SHADER_COMPILATION=ON` - disable compilation of shaders (shaders can be built on other platform)
 - `DXC_CUSTOM_PATH=custom/path/to/dxc` - custom path to *DXC* (will be used if VulkanSDK is not found)
 - `USE_DXC_FROM_PACKMAN_ON_AARCH64=OFF` - use default path for *DXC*
+- `DXR_OMM=OFF` - use legacy NvAPI implementation
+- `D3D_AGILITY_SDK_PATH=/custom/path/to/asdk` - custom path to *Agility SDK*.
 
 ## How to run
 
@@ -38,9 +41,13 @@
 ## Minimum Requirements
 
 Any RTX GPU:
+- RTX 5000 series
 - RTX 4000 series
 - RTX 3000 series
 - RTX 2000 series
+
+To use the DXR 1.2 API, you'll need an R580+ GPU driver or newer.
+Preview drivers can be downloaded from: https://developer.nvidia.com/downloads/shadermodel6-9-preview-driver
 
 ## Usage
 
