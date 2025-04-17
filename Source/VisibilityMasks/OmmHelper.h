@@ -26,7 +26,10 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 #define OMM_SUPPORTS_CPP17 (1)
 #include "omm.h"
 
+#if !DXR_OMM
 #include "nvapi.h"
+#endif
+
 #include "OmmBakerIntegration.h"
 
 namespace ommhelper
@@ -59,6 +62,11 @@ namespace ommhelper
         bool enableDuplicateDetection = true;
         bool enableNearDuplicateDetection = false;
         bool force32bitIndices = false;
+#if DXR_OMM        
+        bool allow8bitIndices = true;
+#else        
+        bool allow8bitIndices = false;
+#endif
     };
 
     struct GpuBakerFlags
@@ -68,6 +76,11 @@ namespace ommhelper
         bool enableTexCoordDeduplication = true;
         bool force32bitIndices = false;
         bool computeOnlyWorkload = true;
+#if DXR_OMM        
+        bool allow8bitIndices = true;
+#else        
+        bool allow8bitIndices = false;
+#endif
     };
 
     struct OmmBakeDesc

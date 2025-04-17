@@ -10,6 +10,12 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 #include "OmmSample.hpp"
 
+
+#if DXR_OMM
+extern "C" { __declspec(dllexport) extern const UINT D3D12SDKVersion = D3D_AGILITY_SDK_VERSION;}
+extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = u8".\\D3D12\\"; }
+#endif
+
 float CalculateWorldToUvUnits(const utils::Scene& scene, uint32_t vertexOffset, uint32_t indexOffset)
 {
     const utils::UnpackedVertex& v0 = scene.unpackedVertices[vertexOffset + scene.indices[indexOffset]];

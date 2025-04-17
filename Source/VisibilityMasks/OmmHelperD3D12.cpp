@@ -45,6 +45,7 @@ namespace ommhelper
 
     void OpacityMicroMapsHelper::InitializeD3D12()
     {
+#if !DXR_OMM
         _NvAPI_Status nvResult = NvAPI_Initialize();
         if (nvResult != NVAPI_OK)
         {
@@ -61,6 +62,7 @@ namespace ommhelper
             printf("[FAIL]: NvAPI_D3D12_SetCreatePipelineStateOptions\n");
             std::abort();
         }
+#endif
     }
 
     inline D3D12_RESOURCE_DESC InitBufferResourceDesc(size_t size, D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE)
@@ -89,6 +91,86 @@ namespace ommhelper
         result.UAV.pResource = resource;
         return result;
     }
+
+#if DXR_OMM
+
+    inline D3D12_RAYTRACING_OPACITY_MICROMAP_ARRAY_DESC FillOmmArrayDesc(MaskedGeometryBuildDesc::Inputs& inputs, ID3D12Resource* ommArrayData, ID3D12Resource* ommDescArray)
+    {
+        uint64_t ommArrayDataOffset = inputs.buffers[(uint32_t)OmmDataLayout::ArrayData].offset;
+        uint64_t ommDescArrayOffset = inputs.buffers[(uint32_t)OmmDataLayout::DescArray].offset;
+
+        D3D12_RAYTRACING_OPACITY_MICROMAP_ARRAY_DESC desc;
+        desc.NumOmmHistogramEntries = inputs.descArrayHistogramNum;
+        desc.pOmmHistogram = (D3D12_RAYTRACING_OPACITY_MICROMAP_HISTOGRAM_ENTRY*)inputs.descArrayHistogram;
+        desc.InputBuffer = ommArrayData ? ommArrayData->GetGPUVirtualAddress() + ommArrayDataOffset : NULL;
+        desc.PerOmmDescs.StartAddress = ommDescArray ? ommDescArray->GetGPUVirtualAddress() + ommDescArrayOffset : NULL;
+        desc.PerOmmDescs.StrideInBytes = sizeof(D3D12_RAYTRACING_OPACITY_MICROMAP_DESC);
+
+        return desc;
+    }
+
+    inline D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS FillDefaultOmmArrayInputsDesc()
+    {
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS vmInput = {};
+        vmInput.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_ARRAY;
+        vmInput.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        vmInput.NumDescs = 1;
+        vmInput.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+
+        return vmInput;
+    }
+
+    inline D3D12_RAYTRACING_GEOMETRY_TRIANGLES_DESC FillGeometryTrianglesDesc(MaskedGeometryBuildDesc::Inputs& inputs, ID3D12Resource* indexData, ID3D12Resource* vertexData)
+    {
+        D3D12_RAYTRACING_GEOMETRY_TRIANGLES_DESC trianglesDesc = {};
+        trianglesDesc.IndexBuffer = indexData ? indexData->GetGPUVirtualAddress() + inputs.indices.offset : NULL;
+        trianglesDesc.IndexFormat = (DXGI_FORMAT)nri::nriConvertNRIFormatToDXGI(inputs.indices.format);
+        trianglesDesc.IndexCount = (UINT)inputs.indices.numElements;
+
+        trianglesDesc.VertexCount = (UINT)inputs.vertices.numElements;
+        trianglesDesc.VertexFormat = (DXGI_FORMAT)nri::nriConvertNRIFormatToDXGI(inputs.vertices.format);
+        trianglesDesc.VertexBuffer.StrideInBytes = inputs.vertices.stride;
+        trianglesDesc.VertexBuffer.StartAddress = vertexData ? vertexData->GetGPUVirtualAddress() + inputs.vertices.offset : NULL;
+
+        return trianglesDesc;
+    }
+
+    inline D3D12_RAYTRACING_GEOMETRY_OMM_LINKAGE_DESC FillGeometryOmmLinkageDesc(MaskedGeometryBuildDesc::Inputs& inputs, ID3D12Resource* ommArray, ID3D12Resource* ommIndexBuffer)
+    {
+        D3D12_RAYTRACING_GEOMETRY_OMM_LINKAGE_DESC odesc;
+        odesc.OpacityMicromapArray = ommArray ? ommArray->GetGPUVirtualAddress() : NULL;
+        odesc.OpacityMicromapBaseLocation = 0;
+        odesc.OpacityMicromapIndexBuffer = {};
+
+        size_t ommIndexOffset = inputs.buffers[(uint32_t)OmmDataLayout::Indices].offset;
+        odesc.OpacityMicromapIndexBuffer.StartAddress = ommIndexBuffer ? ommIndexBuffer->GetGPUVirtualAddress() + ommIndexOffset : NULL;
+        odesc.OpacityMicromapIndexBuffer.StrideInBytes = inputs.ommIndexStride;
+        odesc.OpacityMicromapIndexFormat = (DXGI_FORMAT)nri::nriConvertNRIFormatToDXGI(inputs.ommIndexFormat);
+
+        return odesc;
+    }
+
+    inline D3D12_RAYTRACING_GEOMETRY_DESC FillDefaultGeometryDesc()
+    {
+        D3D12_RAYTRACING_GEOMETRY_DESC geometryDesc = {};
+        geometryDesc.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
+        geometryDesc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_OMM_TRIANGLES;
+        geometryDesc.OmmTriangles = {};
+
+        return geometryDesc;
+    }
+
+    inline D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS FillDefaultBlasInputsDesc()
+    {
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputDesc = {};
+        inputDesc.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+        inputDesc.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        inputDesc.NumDescs = 1;
+        inputDesc.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        return inputDesc;
+    }
+
+#else
 
     inline NVAPI_D3D12_BUILD_RAYTRACING_OPACITY_MICROMAP_ARRAY_INPUTS FillOmmArrayInputsDesc(MaskedGeometryBuildDesc::Inputs& inputs, ID3D12Resource* ommArrayData, ID3D12Resource* ommDescArray)
     {
@@ -150,6 +232,8 @@ namespace ommhelper
         return inputDescEx;
     }
 
+#endif
+
     inline static size_t Align(size_t size)
     {
         constexpr size_t a = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
@@ -207,45 +291,76 @@ namespace ommhelper
         {
             MaskedGeometryBuildDesc& desc = *queue[i];
             {// get omm prebuild info
-                NVAPI_D3D12_BUILD_RAYTRACING_OPACITY_MICROMAP_ARRAY_INPUTS vmInput = FillOmmArrayInputsDesc(desc.inputs, NULL, NULL);
-                NVAPI_D3D12_RAYTRACING_OPACITY_MICROMAP_ARRAY_PREBUILD_INFO ommPrebuildInfo = {};
-                NVAPI_GET_RAYTRACING_OPACITY_MICROMAP_ARRAY_PREBUILD_INFO_PARAMS ommGetPrebuildInfoParams = {};
-                ommGetPrebuildInfoParams.pDesc = &vmInput;
-                ommGetPrebuildInfoParams.pInfo = &ommPrebuildInfo;
-                ommGetPrebuildInfoParams.version = NVAPI_GET_RAYTRACING_OPACITY_MICROMAP_ARRAY_PREBUILD_INFO_PARAMS_VER;
-
-                _NvAPI_Status nvResult = NvAPI_D3D12_GetRaytracingOpacityMicromapArrayPrebuildInfo(GetD3D12Device5(), &ommGetPrebuildInfoParams);
-                if (nvResult != NVAPI_OK)
+#if DXR_OMM
                 {
-                    printf("[FAIL]: NvAPI_D3D12_GetRaytracingOpacityMicromapArrayPrebuildInfo\n");
-                    std::abort();
+                    D3D12_RAYTRACING_OPACITY_MICROMAP_ARRAY_DESC ommDesc = FillOmmArrayDesc(desc.inputs, NULL, NULL);
+                    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS vmInput = FillDefaultOmmArrayInputsDesc();
+                    vmInput.pOpacityMicromapArrayDesc = &ommDesc;
+
+                    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO ommPrebuildInfo = {};
+                    GetD3D12Device5()->GetRaytracingAccelerationStructurePrebuildInfo(&vmInput, &ommPrebuildInfo);
+                    desc.prebuildInfo.ommArraySize = ommPrebuildInfo.ResultDataMaxSizeInBytes;
+                    desc.prebuildInfo.maxScratchDataSize = ommPrebuildInfo.ScratchDataSizeInBytes;
                 }
-                desc.prebuildInfo.ommArraySize = ommPrebuildInfo.resultDataMaxSizeInBytes;
-                desc.prebuildInfo.maxScratchDataSize = ommPrebuildInfo.scratchDataSizeInBytes;
+#else
+                {
+                    NVAPI_D3D12_BUILD_RAYTRACING_OPACITY_MICROMAP_ARRAY_INPUTS vmInput = FillOmmArrayInputsDesc(desc.inputs, NULL, NULL);
+                    NVAPI_D3D12_RAYTRACING_OPACITY_MICROMAP_ARRAY_PREBUILD_INFO ommPrebuildInfo = {};
+                    NVAPI_GET_RAYTRACING_OPACITY_MICROMAP_ARRAY_PREBUILD_INFO_PARAMS ommGetPrebuildInfoParams = {};
+                    ommGetPrebuildInfoParams.pDesc = &vmInput;
+                    ommGetPrebuildInfoParams.pInfo = &ommPrebuildInfo;
+                    ommGetPrebuildInfoParams.version = NVAPI_GET_RAYTRACING_OPACITY_MICROMAP_ARRAY_PREBUILD_INFO_PARAMS_VER;
+                    _NvAPI_Status nvResult = NvAPI_D3D12_GetRaytracingOpacityMicromapArrayPrebuildInfo(GetD3D12Device5(), &ommGetPrebuildInfoParams);
+                    if (nvResult != NVAPI_OK)
+                    {
+                        printf("[FAIL]: NvAPI_D3D12_GetRaytracingOpacityMicromapArrayPrebuildInfo\n");
+                        std::abort();
+                    }
+                    desc.prebuildInfo.ommArraySize = ommPrebuildInfo.resultDataMaxSizeInBytes;
+                    desc.prebuildInfo.maxScratchDataSize = ommPrebuildInfo.scratchDataSizeInBytes;
+                }
+#endif
             }
 
             {//get blas prebuild info
                 nri::Buffer* nriOmmIndexData = desc.inputs.buffers[(uint32_t)OmmDataLayout::Indices].buffer;
-                ID3D12Resource* ommIndexData = nriOmmIndexData ? (ID3D12Resource*)NRI.GetBufferNativeObject(*nriOmmIndexData, 0) : nullptr;
-                NVAPI_D3D12_RAYTRACING_GEOMETRY_DESC_EX geometryDescEx = FillGeometryDescEx(desc.inputs, NULL, NULL, NULL, ommIndexData);
-
-                NVAPI_D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS_EX inputDescEx = FillDefaultBlasInputsDesc();
-                inputDescEx.pGeometryDescs = &geometryDescEx;
-
+                ID3D12Resource* ommIndexData = nriOmmIndexData ? (ID3D12Resource*)NRI.GetBufferNativeObject(*nriOmmIndexData, 0) : nullptr;                
                 D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO blasPrebuildInfo = {};
-                NVAPI_D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS_EX asInputs = {};
-                NVAPI_GET_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO_EX_PARAMS blaskGetPrebuildInfoParams = {};
-                blaskGetPrebuildInfoParams.pInfo = &blasPrebuildInfo;
-                blaskGetPrebuildInfoParams.pDesc = &inputDescEx;
-                blaskGetPrebuildInfoParams.version = NVAPI_GET_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO_EX_PARAMS_VER;
-
-                NvAPI_Status nvapiStatus = NVAPI_OK;
-                nvapiStatus = NvAPI_D3D12_GetRaytracingAccelerationStructurePrebuildInfoEx(GetD3D12Device5(), &blaskGetPrebuildInfoParams);
-                if (nvapiStatus != NVAPI_OK)
+#if DXR_OMM
                 {
-                    printf("[FAIL]: NvAPI_D3D12_GetRaytracingAccelerationStructurePrebuildInfoEx\n");
-                    std::abort();
+                    D3D12_RAYTRACING_GEOMETRY_DESC geometryDesc = FillDefaultGeometryDesc();
+                    D3D12_RAYTRACING_GEOMETRY_TRIANGLES_DESC trianglesDesc = FillGeometryTrianglesDesc(desc.inputs, NULL, NULL);
+                    D3D12_RAYTRACING_GEOMETRY_OMM_LINKAGE_DESC ommDesc = FillGeometryOmmLinkageDesc(desc.inputs, NULL, ommIndexData);
+                    geometryDesc.OmmTriangles.pTriangles = &trianglesDesc;
+                    geometryDesc.OmmTriangles.pOmmLinkage = &ommDesc;
+
+                    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputDesc = FillDefaultBlasInputsDesc();
+                    inputDesc.pGeometryDescs = &geometryDesc;
+
+                    GetD3D12Device5()->GetRaytracingAccelerationStructurePrebuildInfo(&inputDesc, &blasPrebuildInfo);
                 }
+#else
+                {
+                    NVAPI_D3D12_RAYTRACING_GEOMETRY_DESC_EX geometryDescEx = FillGeometryDescEx(desc.inputs, NULL, NULL, NULL, ommIndexData);
+
+                    NVAPI_D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS_EX inputDescEx = FillDefaultBlasInputsDesc();
+                    inputDescEx.pGeometryDescs = &geometryDescEx;
+
+                    NVAPI_GET_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO_EX_PARAMS blaskGetPrebuildInfoParams = {};
+                    NVAPI_D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS_EX asInputs = {};
+                    blaskGetPrebuildInfoParams.pInfo = &blasPrebuildInfo;
+                    blaskGetPrebuildInfoParams.pDesc = &inputDescEx;
+                    blaskGetPrebuildInfoParams.version = NVAPI_GET_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO_EX_PARAMS_VER;
+
+                    NvAPI_Status nvapiStatus = NVAPI_OK;
+                    nvapiStatus = NvAPI_D3D12_GetRaytracingAccelerationStructurePrebuildInfoEx(GetD3D12Device5(), &blaskGetPrebuildInfoParams);
+                    if (nvapiStatus != NVAPI_OK)
+                    {
+                        printf("[FAIL]: NvAPI_D3D12_GetRaytracingAccelerationStructurePrebuildInfoEx\n");
+                        std::abort();
+                    }
+                }
+#endif
                 desc.prebuildInfo.blasSize = blasPrebuildInfo.ResultDataMaxSizeInBytes;
                 desc.prebuildInfo.maxScratchDataSize = std::max(blasPrebuildInfo.ScratchDataSizeInBytes, desc.prebuildInfo.maxScratchDataSize);
             }
@@ -260,10 +375,26 @@ namespace ommhelper
         ID3D12Resource* ommArrayData = (ID3D12Resource*)NRI.GetBufferNativeObject(*desc.inputs.buffers[(uint32_t)OmmDataLayout::ArrayData].buffer, 0);
         ID3D12Resource* ommDescArray = (ID3D12Resource*)NRI.GetBufferNativeObject(*desc.inputs.buffers[(uint32_t)OmmDataLayout::DescArray].buffer, 0);
 
-        NVAPI_D3D12_BUILD_RAYTRACING_OPACITY_MICROMAP_ARRAY_INPUTS vmInput = FillOmmArrayInputsDesc(desc.inputs, ommArrayData, ommDescArray);
+        ID3D12Resource* ommArrayBuffer = nullptr;
+        BindResourceToMemoryD3D12(ommArrayBuffer, desc.prebuildInfo.ommArraySize);
+
+#if DXR_OMM
         {
-            ID3D12Resource* ommArrayBuffer = nullptr;
-            BindResourceToMemoryD3D12(ommArrayBuffer, desc.prebuildInfo.ommArraySize);
+            D3D12_RAYTRACING_OPACITY_MICROMAP_ARRAY_DESC ommDesc = FillOmmArrayDesc(desc.inputs, ommArrayData, ommDescArray);
+            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS vmInput = FillDefaultOmmArrayInputsDesc();
+            vmInput.pOpacityMicromapArrayDesc = &ommDesc;
+
+            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC vmArrayDesc = {};
+            vmArrayDesc.DestAccelerationStructureData = ommArrayBuffer->GetGPUVirtualAddress();
+            vmArrayDesc.Inputs = vmInput;
+            vmArrayDesc.ScratchAccelerationStructureData = m_D3D12ScratchBuffer->GetGPUVirtualAddress();
+
+            D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC info = {};
+            GetD3D12GraphicsCommandList4(commandBuffer)->BuildRaytracingAccelerationStructure(&vmArrayDesc, 0, &info);
+        }
+#else
+        {
+            NVAPI_D3D12_BUILD_RAYTRACING_OPACITY_MICROMAP_ARRAY_INPUTS vmInput = FillOmmArrayInputsDesc(desc.inputs, ommArrayData, ommDescArray);
 
             NVAPI_D3D12_BUILD_RAYTRACING_OPACITY_MICROMAP_ARRAY_DESC vmArrayDesc = {};
             vmArrayDesc.destOpacityMicromapArrayData = ommArrayBuffer->GetGPUVirtualAddress();
@@ -282,13 +413,15 @@ namespace ommhelper
                 printf("[FAIL]: NvAPI_D3D12_BuildRaytracingOpacityMicromapArray\n");
                 std::abort();
             }
-            D3D12_RESOURCE_BARRIER barriers[] = { InitUavBarrier(m_D3D12ScratchBuffer) };
-            GetD3D12GraphicsCommandList4(commandBuffer)->ResourceBarrier(_countof(barriers), barriers);
-
-            nri::BufferD3D12Desc wrappedBufferDesc = { ommArrayBuffer , 0 };
-            NRI.CreateBufferD3D12(*m_Device, wrappedBufferDesc, desc.outputs.ommArray);
-            ommArrayBuffer->Release();//dereference the resource to ensure it's destruction via NRI
         }
+#endif
+
+        D3D12_RESOURCE_BARRIER barriers[] = { InitUavBarrier(m_D3D12ScratchBuffer) };
+        GetD3D12GraphicsCommandList4(commandBuffer)->ResourceBarrier(_countof(barriers), barriers);
+
+        nri::BufferD3D12Desc wrappedBufferDesc = { ommArrayBuffer , 0 };
+        NRI.CreateBufferD3D12(*m_Device, wrappedBufferDesc, desc.outputs.ommArray);
+        ommArrayBuffer->Release();//dereference the resource to ensure it's destruction via NRI
     }
 
     void OpacityMicroMapsHelper::BuildBlasD3D12(MaskedGeometryBuildDesc& desc, nri::CommandBuffer* commandBuffer)
@@ -301,13 +434,34 @@ namespace ommhelper
         ID3D12Resource* ommArray = (ID3D12Resource*)NRI.GetBufferNativeObject(*desc.outputs.ommArray, 0);
         ID3D12Resource* ommIndexData = (ID3D12Resource*)NRI.GetBufferNativeObject(*desc.inputs.buffers[(uint32_t)OmmDataLayout::Indices].buffer, 0);
 
-        NVAPI_D3D12_RAYTRACING_GEOMETRY_DESC_EX geometryDescEx = FillGeometryDescEx(desc.inputs, indexData, vertexData, ommArray, ommIndexData);
-        NVAPI_D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS_EX inputDescEx = FillDefaultBlasInputsDesc();
-        inputDescEx.pGeometryDescs = &geometryDescEx;
-
         ID3D12Resource* blas = nullptr;
         BindResourceToMemoryD3D12(blas, desc.prebuildInfo.blasSize);
+        
+#if DXR_OMM
         {
+            D3D12_RAYTRACING_GEOMETRY_DESC geometryDesc = FillDefaultGeometryDesc();
+            D3D12_RAYTRACING_GEOMETRY_TRIANGLES_DESC trianglesDesc = FillGeometryTrianglesDesc(desc.inputs, indexData, vertexData);
+            D3D12_RAYTRACING_GEOMETRY_OMM_LINKAGE_DESC ommDesc = FillGeometryOmmLinkageDesc(desc.inputs, ommArray, ommIndexData);
+            geometryDesc.OmmTriangles.pTriangles = &trianglesDesc;
+            geometryDesc.OmmTriangles.pOmmLinkage = &ommDesc;
+
+            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputDesc = FillDefaultBlasInputsDesc();
+            inputDesc.pGeometryDescs = &geometryDesc;
+
+            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC vmArrayDesc = {};
+            vmArrayDesc.DestAccelerationStructureData = blas->GetGPUVirtualAddress();
+            vmArrayDesc.Inputs = inputDesc;
+            vmArrayDesc.ScratchAccelerationStructureData = m_D3D12ScratchBuffer->GetGPUVirtualAddress();
+
+            D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC info = {};
+            GetD3D12GraphicsCommandList4(commandBuffer)->BuildRaytracingAccelerationStructure(&vmArrayDesc, 0, &info);
+        }
+#else
+        {
+            NVAPI_D3D12_RAYTRACING_GEOMETRY_DESC_EX geometryDescEx = FillGeometryDescEx(desc.inputs, indexData, vertexData, ommArray, ommIndexData);
+            NVAPI_D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS_EX inputDescEx = FillDefaultBlasInputsDesc();
+            inputDescEx.pGeometryDescs = &geometryDescEx;
+            
             NVAPI_D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC_EX asDesc = {};
             asDesc.destAccelerationStructureData = blas->GetGPUVirtualAddress();
             asDesc.inputs = inputDescEx;
@@ -326,6 +480,7 @@ namespace ommhelper
                 std::abort();
             }
         }
+#endif
         D3D12_RESOURCE_BARRIER barriers[] = { InitUavBarrier(m_D3D12ScratchBuffer) };
         GetD3D12GraphicsCommandList4(commandBuffer)->ResourceBarrier(_countof(barriers), barriers);
 

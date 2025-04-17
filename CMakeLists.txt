@@ -4,6 +4,7 @@ cmake_minimum_required(VERSION 3.15)
 option(DISABLE_SHADER_COMPILATION "Disable shader compilation" OFF)
 option(USE_DXC_FROM_PACKMAN_ON_AARCH64 "Use DXC from Packman for `aarch64`" ON)
 set (SHADER_OUTPUT_PATH "${CMAKE_CURRENT_SOURCE_DIR}/_Shaders")
+option(DXR_OMM "Use DXR 1.2 API" ON)
 
 # Cached
 set(DXC_CUSTOM_PATH "custom/path/to/dxc" CACHE STRING "This DXC will be used if Vulkan SDK is not installed")
@@ -90,14 +91,11 @@ option(NRD_DISABLE_SHADER_COMPILATION "" ${DISABLE_SHADER_COMPILATION})
 
 add_subdirectory("External/NRD")
 
-# NVAPI
-find_library(INPUT_NVAPI_LIB NAMES nvapi64.lib PATHS "External/NRIFramework/External/NRI/External/nvapi/amd64")
-
 # Opacity Micro-Maps
 set(OMM_PROJECT_FOLDER "Opacity Micro-Map SDK")
 set(OMM_ENABLE_TESTS OFF CACHE BOOL "")
-set(OMM_ENABLE_GPU_TESTS OFF CACHE BOOL "")
-set(OMM_ENABLE_BENCHMARK OFF CACHE BOOL "")
+set(OMM_BUILD_VIEWER OFF CACHE BOOL "")
+set(OMM_INTEGRATION_LAYER_NVRHI OFF CACHE BOOL "")
 set(OMM_STATIC_LIBRARY OFF CACHE BOOL "")
 set(OMM_OUTPUT_BIN_PATH "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
 add_subdirectory("External/Opacity-MicroMap-SDK")
@@ -115,21 +113,52 @@ target_include_directories(${PROJECT_NAME} PRIVATE "External/NRIFramework/Includ
 target_include_directories(${PROJECT_NAME} PRIVATE "External/NRIFramework/External/NRI/Include")
 target_include_directories(${PROJECT_NAME} PRIVATE "External/NRIFramework/External")
 target_include_directories(${PROJECT_NAME} PRIVATE "External/NRD/Include" "External/NRD/Integration")
-target_include_directories(${PROJECT_NAME} PRIVATE "External/Opacity-MicroMap-SDK/omm-sdk/include")
-target_include_directories(${PROJECT_NAME} PRIVATE "External/NRIFramework/External/NRI/External/nvapi")
+target_include_directories(${PROJECT_NAME} PRIVATE "External/omm_bake/libraries/omm-lib/include")
 target_compile_definitions (${PROJECT_NAME} PRIVATE ${COMPILE_DEFINITIONS} PROJECT_NAME=${PROJECT_NAME} NRD_NORMAL_ENCODING=${NRD_NORMAL_ENCODING} NRD_ROUGHNESS_ENCODING=${NRD_ROUGHNESS_ENCODING} DXC_PATH=${DXC_PATH} DXC_SPIRV_PATH=${DXC_SPIRV_PATH})
 target_compile_options(${PROJECT_NAME} PRIVATE ${COMPILE_OPTIONS})
 
-target_link_libraries(${PROJECT_NAME} PRIVATE NRIFramework NRI NRD omm-sdk)
+target_link_libraries(${PROJECT_NAME} PRIVATE NRIFramework NRI NRD omm-lib)
+
+if (DXR_OMM)
+    # DXR 1.2 API
+    set(D3D_AGILITY_SDK_VERSION 616)
+    set(D3D_AGILITY_SDK_FULL_VERSION 1.${D3D_AGILITY_SDK_VERSION}.0)
+    
+    if(NOT DEFINED D3D_AGILITY_SDK_PATH)
+        set(D3D_AGILITY_SDK_PATH "${CMAKE_CURRENT_SOURCE_DIR}/External/AgilitySDK")
+
+        include(FetchContent)
+        FetchContent_Declare(
+            DirectX-Agility-SDK
+            URL            "https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/${D3D_AGILITY_SDK_FULL_VERSION}"
+            SOURCE_DIR     "${D3D_AGILITY_SDK_PATH}"
+            DOWNLOAD_EXTRACT_TIMESTAMP ON
+        )
+        FetchContent_MakeAvailable(DirectX-Agility-SDK)
+    endif()
+
+    target_compile_definitions(${PROJECT_NAME} PRIVATE DXR_OMM=1)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE D3D_AGILITY_SDK_VERSION=${D3D_AGILITY_SDK_VERSION})    
+    target_include_directories(${PROJECT_NAME} PRIVATE ${D3D_AGILITY_SDK_PATH}/build/native/include)
+
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:${PROJECT_NAME}>/D3D12
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${D3D_AGILITY_SDK_PATH}/build/native/bin/x64/D3D12Core.dll $<TARGET_FILE_DIR:${PROJECT_NAME}>/D3D12
+        COMMAND "$<$<CONFIG:Debug>:${CMAKE_COMMAND}>" "$<$<CONFIG:Debug>:-E>" "$<$<CONFIG:Debug>:copy_if_different>" "$<$<CONFIG:Debug>:${D3D_AGILITY_SDK_PATH}/build/native/bin/x64/d3d12SDKLayers.dll>" "$<$<CONFIG:Debug>:$<TARGET_FILE_DIR:${PROJECT_NAME}>/D3D12>"
+    )
+else()
+    # NVAPI
+    find_library(INPUT_NVAPI_LIB NAMES nvapi64.lib PATHS "External/NRIFramework/External/NRI/External/nvapi/amd64")
+    if (INPUT_NVAPI_LIB)
+        target_link_libraries(${PROJECT_NAME} PRIVATE ${INPUT_NVAPI_LIB})
+    else()
+        message(WARNING "Can't find NVAPI64 DLL.")
+    endif()
+    target_include_directories(${PROJECT_NAME} PRIVATE "External/NRIFramework/External/NRI/External/nvapi")
+endif()
 
 if(UNIX)
     target_link_libraries(${PROJECT_NAME} PRIVATE ${CMAKE_DL_LIBS} pthread X11)
-endif()
-
-if (INPUT_NVAPI_LIB)
-    target_link_libraries(${PROJECT_NAME} PRIVATE ${INPUT_NVAPI_LIB})
-else()
-    message(WARNING "Can't find NVAPI64 DLL.")
 endif()
 
 set_property(TARGET ${PROJECT_NAME} PROPERTY FOLDER "Sample")
@@ -211,7 +240,7 @@ else ()
 endif ()
 
 # Opacity Micro-Map integration files
-if (TARGET omm-sdk)
+if (TARGET omm-lib)
     file(GLOB VM_INTEGRATION_FILES "Source/VisibilityMasks/*.h" "Source/VisibilityMasks/*.cpp")
     source_group("VM Helper" FILES ${VM_INTEGRATION_FILES})
     target_sources(${PROJECT_NAME}  PRIVATE ${VM_INTEGRATION_FILES})
