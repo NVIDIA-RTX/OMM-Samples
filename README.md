@@ -5,6 +5,8 @@
 - Rendering and Denoising are based on NRDSample: https://github.com/NVIDIAGameWorks/NRDSample
 - The sample primarily uses the DXR 1.2 API, with NvAPI available as a legacy fallback option.
 
+**Note:** The DXR 1.2 API requires a preview driver, available at: https://developer.nvidia.com/downloads/shadermodel6-9-preview-driver
+
 ## Build instructions
 
 - Install [*Cmake*](https://cmake.org/download/) 3.15+
@@ -45,9 +47,6 @@ Any RTX GPU:
 - RTX 4000 series
 - RTX 3000 series
 - RTX 2000 series
-
-To use the DXR 1.2 API, you'll need an R580+ GPU driver or newer.
-Preview drivers can be downloaded from: https://developer.nvidia.com/downloads/shadermodel6-9-preview-driver
 
 ## Usage
 
