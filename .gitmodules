@@ -1,16 +1,12 @@
-[submodule "External/NRIFramework"]
-	path = External/NRIFramework
-	url = https://github.com/NVIDIAGameWorks/NRIFramework.git
-	branch = omm_sample
-[submodule "External/NRD"]
-	path = External/NRD
-	url = https://github.com/NVIDIAGameWorks/RayTracingDenoiser.git
-	branch = master
-[submodule "External/NGX"]
-	path = External/NGX
-	url = https://github.com/NVIDIA/DLSS.git
-	branch = main
 [submodule "External/Opacity-MicroMap-SDK"]
 	path = External/Opacity-MicroMap-SDK
 	url = https://github.com/NVIDIAGameWorks/Opacity-MicroMap-SDK.git
+	branch = main
+[submodule "External/NRD"]
+	path = External/NRD
+	url = https://github.com/NVIDIA-RTX/NRD.git
+	branch = master
+[submodule "External/NRIFramework"]
+	path = External/NRIFramework
+	url = https://github.com/NVIDIA-RTX/NRIFramework.git
 	branch = main
