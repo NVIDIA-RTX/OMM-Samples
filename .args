@@ -5,9 +5,6 @@
       "Command": "API",
       "Items": [
         {
-          "Command": "--api=D3D11"
-        },
-        {
           "Command": "--api=D3D12"
         },
         {
@@ -32,6 +29,9 @@
         },
         {
           "Command": "--width=3440 --height=1440"
+        },
+        {
+          "Command": "--width=5120 --height=1440"
         },
         {
           "Command": "--width=3840 --height=2160"
@@ -67,6 +67,20 @@
       ]
     },
     {
+      "Command": "DPI",
+      "Items": [
+        {
+          "Command": "--dpiMode=0"
+        },
+        {
+          "Command": "--dpiMode=1"
+        },
+        {
+          "Command": "--dpiMode=2"
+        }
+      ]
+    },
+    {
       "Command": "OTHER",
       "Items": [
         {
@@ -76,7 +90,7 @@
           "Command": "--debugNRI"
         },
         {
-          "Command": "--enableDPI"
+          "Command": "--debugNRD"
         },
         {
           "Command": "--frameNum=9999999"
@@ -87,16 +101,19 @@
       "Command": "SCENES",
       "Items": [
         {
-          "Command": "--scene=ShaderBalls/ShaderBalls.obj"
+          "Command": "--scene=ShaderBalls/ShaderBalls.gltf"
         },
         {
-          "Command": "--scene=Bistro/BistroInterior.fbx"
+          "Command": "--scene=Bistro/BistroInterior.gltf"
         },
         {
-          "Command": "--scene=Bistro/BistroExterior.fbx"
+          "Command": "--scene=Bistro/BistroExterior.gltf"
         },
         {
-          "Command": "--scene=ZeroDay/MEASURE_SEVEN/MEASURE_SEVEN.fbx"
+          "Command": "--scene=Hair/Hair.gltf"
+        },
+        {
+          "Command": "--scene=Kitchen/Kitchen.gltf"
         }
       ]
     },

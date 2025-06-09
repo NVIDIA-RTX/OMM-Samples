@@ -9,29 +9,28 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 */
 
 #pragma once
-#include <vector>
 #include <map>
+#include <vector>
 
 #include "../../External/NRIFramework/External/NRI/Include/NRI.h"
+
 #include "../../External/NRIFramework/External/NRI/Include/Extensions/NRIHelper.h"
 
 #define OMM_SUPPORTS_CPP17 (1)
 #include "omm.h"
 
-struct TextureResource
-{
+struct TextureResource {
     nri::Texture* texture;
     nri::Format format;
     nri::AccessBits state;
-    nri::TextureLayout layout;
+    nri::Layout layout;
     uint32_t width;
     uint32_t height;
     uint32_t mipOffset;
     uint32_t alphaChannelId;
 };
 
-struct BufferResource
-{
+struct BufferResource {
     nri::Buffer* buffer;
     nri::Format format = nri::Format::R32_UINT;
     uint64_t size;
@@ -42,8 +41,7 @@ struct BufferResource
     nri::AccessBits state;
 };
 
-struct PrebuildInfo
-{
+struct PrebuildInfo {
     uint64_t arrayDataSize;
     uint64_t descArraySize;
     uint64_t indexBufferSize;
@@ -56,21 +54,18 @@ struct PrebuildInfo
     nri::Format indexFormat;
 };
 
-enum class BakerAlphaMode : uint32_t
-{
+enum class BakerAlphaMode : uint32_t {
     Test = (uint32_t)ommAlphaMode_Test,
     Blend = (uint32_t)ommAlphaMode_Blend,
     Count
 };
 
-enum class BakerOmmFormat : uint16_t
-{
+enum class BakerOmmFormat : uint16_t {
     OC1_2_State = 1,
     OC1_4_State = 2,
 };
 
-enum class BakerScratchMemoryBudget : uint64_t
-{
+enum class BakerScratchMemoryBudget : uint64_t {
     Undefined = (uint64_t)ommGpuScratchMemoryBudget_Undefined,
 
     MB_4 = (uint64_t)ommGpuScratchMemoryBudget_MB_4,
@@ -84,8 +79,7 @@ enum class BakerScratchMemoryBudget : uint64_t
     Default = (uint64_t)ommGpuScratchMemoryBudget_Default,
 };
 
-enum class BakerBakeFlags : uint32_t
-{
+enum class BakerBakeFlags : uint32_t {
     Invalid = (uint32_t)ommGpuBakeFlags_Invalid,
     PerformBake = (uint32_t)ommGpuBakeFlags_PerformBake,
     PerformSetup = (uint32_t)ommGpuBakeFlags_PerformSetup,
@@ -98,8 +92,7 @@ enum class BakerBakeFlags : uint32_t
     Allow8BitIndices = (uint32_t)ommGpuBakeFlags_Allow8BitIndices
 };
 
-struct BakerSettings
-{
+struct BakerSettings {
     uint32_t maxSubdivisionLevel;
 
     float dynamicSubdivisionScale;
@@ -116,87 +109,71 @@ struct BakerSettings
     BakerBakeFlags bakeFlags;
 };
 
-struct BakerInputs
-{
+struct BakerInputs {
     TextureResource inTexture;
     BufferResource inUvBuffer;
     BufferResource inIndexBuffer;
-    BufferResource inSubdivisionLevelBuffer; //currently unused
+    BufferResource inSubdivisionLevelBuffer; // currently unused
     BufferResource inTransientPool[OMM_MAX_TRANSIENT_POOL_BUFFERS];
 };
 
-struct BakerOutputs
-{
-    BufferResource outArrayData = { nullptr, nri::Format::R32_UINT };
-    BufferResource outDescArray = { nullptr, nri::Format::R32_UINT };
-    BufferResource outIndexBuffer = { nullptr, nri::Format::R32_UINT };
-    BufferResource outArrayHistogram = { nullptr, nri::Format::R32_UINT };
-    BufferResource outIndexHistogram = { nullptr, nri::Format::R32_UINT };
-    BufferResource outPostBuildInfo = { nullptr, nri::Format::R32_UINT };
+struct BakerOutputs {
+    BufferResource outArrayData = {nullptr, nri::Format::R32_UINT};
+    BufferResource outDescArray = {nullptr, nri::Format::R32_UINT};
+    BufferResource outIndexBuffer = {nullptr, nri::Format::R32_UINT};
+    BufferResource outArrayHistogram = {nullptr, nri::Format::R32_UINT};
+    BufferResource outIndexHistogram = {nullptr, nri::Format::R32_UINT};
+    BufferResource outPostBuildInfo = {nullptr, nri::Format::R32_UINT};
 
     PrebuildInfo prebuildInfo;
 };
 
-struct InputGeometryDesc
-{
+struct InputGeometryDesc {
     BakerInputs inputs;
     BakerOutputs outputs;
     BakerSettings settings;
 };
 
-class OmmBakerGpuIntegration
-{
+class OmmBakerGpuIntegration {
 public:
-    void Initialize(nri::Device& device);                                                               //0.
-    void GetPrebuildInfo(InputGeometryDesc* geometryDesc, uint32_t geometryNum);                        //1. Get info on output resources sizes
-    void Bake(nri::CommandBuffer& commandBuffer, InputGeometryDesc* geometryDesc, uint32_t geometryNum);//2. After the queue is ready kick off the baker
-    void ReleaseTemporalResources();                                                                    //3. Clean up internal data after work is finished
-    void Destroy();                                                                                     //4.
+    void Initialize(nri::Device& device);                                                                // 0.
+    void GetPrebuildInfo(InputGeometryDesc* geometryDesc, uint32_t geometryNum);                         // 1. Get info on output resources sizes
+    void Bake(nri::CommandBuffer& commandBuffer, InputGeometryDesc* geometryDesc, uint32_t geometryNum); // 2. After the queue is ready kick off the baker
+    void ReleaseTemporalResources();                                                                     // 3. Clean up internal data after work is finished
+    void Destroy();                                                                                      // 4.
 
 private:
     struct NRIInterface
-        : public nri::CoreInterface
-        , public nri::HelperInterface
-    {};
+        : public nri::CoreInterface,
+          public nri::HelperInterface {};
 
-    enum class GpuStaticResources
-    {
+    enum class GpuStaticResources {
         IndexBuffer,
         VertexBuffer,
         Count,
     };
 
-    struct FrameBuffer
-    {
-        nri::FrameBuffer* frameBuffer;
-        nri::Texture* texture;
-        nri::Memory* memory;
-        nri::Descriptor* descriptor;
-        nri::AccessBits state = nri::AccessBits::UNKNOWN;
-    };
-
-    struct GeometryQueueInstance
-    {
+    struct GeometryQueueInstance {
         InputGeometryDesc* desc;
         ommGpuDispatchConfigDesc dispatchConfigDesc;
     };
 
 private:
-    //On Init
-    void CreateFrameBuffers(uint32_t pipelineNum);
+    // On Init
+    void CreateTextures(uint32_t pipelineNum);
     void CreateSamplers(const ommGpuPipelineInfoDesc* pipelinesInfo);
     void CreatePipelines(const ommGpuPipelineInfoDesc* pipelinesInfo);
     void CreateComputePipeline(uint32_t id, const ommGpuPipelineInfoDesc* pipelineInfo);
     void CreateGraphicsPipeline(uint32_t id, const ommGpuPipelineInfoDesc* pipelineInfo);
-    void CreateStaticResources(nri::CommandQueue* commandQueue);
+    void CreateStaticResources(nri::Queue* commandQueue);
 
-    //On Submit
+    // On Submit
     void AddGeometryToQueue(InputGeometryDesc* geometryDesc, uint32_t geometryNum);
 
-    //On Build
+    // On Build
     nri::DescriptorSet* PrepareDispatch(nri::CommandBuffer& commandBuffer, const ommGpuResource* resources, uint32_t resourceNum, uint32_t pipelineIndex, uint32_t geometryId);
     void InsertUavBarriers(nri::CommandBuffer& commandBuffer, const ommGpuResource* resources, uint32_t resourceNum, uint32_t geometryId);
-    void PerformResourceTransition(const ommGpuResource& resource, uint32_t geometryId, std::vector<nri::BufferTransitionBarrierDesc>& bufferBarriers);
+    void PerformResourceTransition(const ommGpuResource& resource, uint32_t geometryId, std::vector<nri::BufferBarrierDesc>& bufferBarriers);
     BufferResource& GetBuffer(const ommGpuResource& resource, uint32_t geometryId);
 
     void UpdateDescriptorPool(uint32_t geometryId, const ommGpuDispatchChain* dispatchChain);
@@ -212,25 +189,25 @@ private:
 private:
     std::vector<GeometryQueueInstance> m_GeometryQueue;
 
-    //resources
+    // resources
     BufferResource m_StaticBuffers[(uint32_t)GpuStaticResources::Count];
     std::map<uint64_t, nri::Descriptor*> m_NriDescriptors;
     std::map<uint64_t, nri::DescriptorSet*> m_NriDescriptorSets;
     std::vector<nri::Memory*> m_NriStaticMemories;
     std::vector<nri::DescriptorPool*> m_NriDescriptorPools;
 
-    //samplers
+    // samplers
     std::vector<nri::Descriptor*> m_Samplers;
 
-    //pipelines
+    // pipelines
     std::vector<nri::Pipeline*> m_NriPipelines;
     std::vector<nri::PipelineLayout*> m_NriPipelineLayouts;
 
-    //vars
+    // vars
     NRIInterface NRI = {};
     nri::Device* m_Device;
 
-    //CB
+    // CB
     nri::Descriptor* m_ConstantBufferView;
     nri::Buffer* m_ConstantBuffer;
     nri::Memory* m_ConstantBufferHeap;
@@ -238,16 +215,21 @@ private:
     uint32_t m_ConstantBufferSize;
     uint32_t m_ConstantBufferOffset;
 
-    //framebuffers
-    FrameBuffer m_FrameBuffers[2];
-    std::vector<FrameBuffer*> m_FrameBufferPerPipeline;
+    // Textures
+    nri::Texture* m_DebugTexture;
+    nri::Memory* m_DebugTextureMemory;
+    nri::Descriptor* m_DebugTextureDescriptor;
+    nri::AccessBits m_DebugTextureState = nri::AccessBits::UNKNOWN;
+
+    nri::Descriptor* m_EmptyDescriptor;
+    std::vector<nri::Descriptor*> m_ColorDescriptorPerPipeline;
+
     const uint32_t m_EmptyFrameBufferId = 0;
     const uint32_t m_DebugFrameBufferId = 1;
     const nri::Format m_DebugTexFormat = nri::Format::RGBA8_SNORM;
 
-    //ommbaker
+    // ommbaker
     const ommGpuPipelineInfoDesc* m_PipelineInfo;
     ommBaker m_GpuBaker;
     ommGpuPipeline m_Pipeline;
 };
-

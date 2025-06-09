@@ -1,25 +1,19 @@
-/*
-Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
-
-NVIDIA CORPORATION and its licensors retain all intellectual property
-and proprietary rights in and to this software, related documentation
-and any modifications thereto. Any use, reproduction, disclosure or
-distribution of this software and related documentation without an express
-license agreement from NVIDIA CORPORATION is strictly prohibited.
-*/
+// © 2022 NVIDIA Corporation
 
 #include "Include/Shared.hlsli"
 #include "Include/RaytracingShared.hlsli"
 
+#define SHARC_QUERY 1
+#include "SharcCommon.h"
+
 // Inputs
-NRI_RESOURCE( Texture2D<float>, gIn_ViewZ, t, 0, 1 );
-NRI_RESOURCE( Texture2D<float3>, gIn_ComposedDiff, t, 1, 1 );
-NRI_RESOURCE( Texture2D<float4>, gIn_ComposedSpec_ViewZ, t, 2, 1 );
-NRI_RESOURCE( Texture2D<float3>, gIn_Ambient, t, 3, 1 );
+NRI_RESOURCE( Texture2D<float3>, gIn_ComposedDiff, t, 0, 1 );
+NRI_RESOURCE( Texture2D<float4>, gIn_ComposedSpec_ViewZ, t, 1, 1 );
 
 // Outputs
-NRI_RESOURCE( RWTexture2D<float4>, gOut_Composed, u, 0, 1 );
-NRI_RESOURCE( RWTexture2D<float3>, gInOut_Mv, u, 1, 1 );
+NRI_FORMAT("unknown") NRI_RESOURCE( RWTexture2D<float3>, gOut_Composed, u, 0, 1 );
+NRI_FORMAT("unknown") NRI_RESOURCE( RWTexture2D<float4>, gInOut_Mv, u, 1, 1 );
+NRI_FORMAT("unknown") NRI_RESOURCE( RWTexture2D<float4>, gOut_Normal_Roughness, u, 2, 1 );
 
 //========================================================================================
 // TRACE TRANSPARENT
@@ -33,9 +27,6 @@ struct TraceTransparentDesc
     // Pixel position
     uint2 pixelPos;
 
-    // Number of bounces to trace ( up to )
-    uint bounceNum;
-
     // Is reflection or refraction in first segment?
     bool isReflection;
 };
@@ -48,155 +39,195 @@ struct TraceTransparentDesc
 //      - add missing component (reflection or refraction) from neighboring pixels
 float3 TraceTransparent( TraceTransparentDesc desc )
 {
-    float eta = STL::BRDF::IOR::Air / STL::BRDF::IOR::Glass;
+    float eta = BRDF::IOR::Air / BRDF::IOR::Glass;
 
     GeometryProps geometryProps = desc.geometryProps;
     float pathThroughput = 1.0;
     bool isReflection = desc.isReflection;
+    float bayer = Sequence::Bayer4x4( desc.pixelPos, gFrameIndex );
 
     [loop]
-    for( uint bounce = 1; bounce <= desc.bounceNum; bounce++ ) // TODO: stop if pathThroughput is low
+    for( uint bounce = 1; bounce <= PT_DELTA_BOUNCES_NUM; bounce++ )
     {
         // Reflection or refraction?
         float NoV = abs( dot( geometryProps.N, geometryProps.V ) );
-        float F = STL::BRDF::FresnelTerm_Dielectric( eta, NoV );
+        float F = BRDF::FresnelTerm_Dielectric( eta, NoV );
 
         if( bounce == 1 )
             pathThroughput *= isReflection ? F : 1.0 - F;
         else
-            isReflection = STL::Rng::Hash::GetFloat( ) < F;
-
-        // Compute ray
-        float3 ray = reflect( -geometryProps.V, geometryProps.N );
-
-        if( !isReflection )
         {
-            float3 I = -geometryProps.V;
-            float NoI = dot( geometryProps.N, I );
-            float k = 1.0 - eta * eta * ( 1.0 - NoI * NoI );
+            float rnd = frac( bayer + Sequence::Halton( bounce, 3 ) ); // "Halton( bounce, 2 )" works worse than others
 
-            if( k < 0.0 )
-                return 0.0; // should't be here
+            // Bonus dithering to break banding // TODO: needed for "transparent machines"
+            /*
+            float ditherMask = Sequence::Bayer4x4( desc.pixelPos, bounce ); // or
+            //float ditherMask = Rng::Hash::GetFloat( ); // or
+            rnd = saturate( rnd + ( ditherMask - 0.5 ) * 0.04 );
+            */
 
-            ray = normalize( eta * I - ( eta * NoI + sqrt( k ) ) * geometryProps.N );
-            eta = 1.0 / eta;
+            [flatten]
+            if( gDenoiserType == DENOISER_REFERENCE || gRR )
+                rnd = Rng::Hash::GetFloat( );
+            else
+                F = clamp( F, PT_GLASS_MIN_F, 1.0 - PT_GLASS_MIN_F ); // TODO: needed?
+
+            isReflection = rnd < F; // TODO: if "F" is clamped, "pathThroughput" should be adjusted too
         }
 
         // Trace
-        float3 origin = _GetXoffset( geometryProps.X, geometryProps.N * STL::Math::Sign( dot( ray, geometryProps.N ) ) );
-        uint flags = bounce == desc.bounceNum ? GEOMETRY_IGNORE_TRANSPARENT : GEOMETRY_ALL;
+        uint flags = bounce == PT_DELTA_BOUNCES_NUM ? FLAG_NON_TRANSPARENT : GEOMETRY_ALL;
 
-        geometryProps = CastRay( origin, ray, 0.0, INF, GetConeAngleFromRoughness( geometryProps.mip, 0.0 ), gWorldTlas, flags, 0 );
+        float3 Xoffset, ray;
+        eta = GetDeltaEventRay( geometryProps, isReflection, eta, Xoffset, ray );
 
-        // TODO: glass internal extinction?
-        // ideally each "medium" should have "eta" and "extinction" parameters in "TraceTransparentDesc" and "TraceOpaqueDesc"
-        if( !isReflection )
-            pathThroughput *= 0.96;
+        geometryProps = CastRay( Xoffset, ray, 0.0, INF, GetConeAngleFromRoughness( geometryProps.mip, 0.0 ), gWorldTlas, flags, 0 );
+
+        // TODO: ideally each "medium" should have "eta" and "extinction" parameters in "TraceTransparentDesc" and "TraceOpaqueDesc"
+        bool isAir = eta < 1.0;
+        float extinction = isAir ? 0.0 : 1.0; // TODO: tint color? // TODO: 0.01 for "transparent machines"
+        if( !geometryProps.IsSky() ) // TODO: fix for non-convex geometry
+            pathThroughput *= exp( -extinction * geometryProps.hitT );
 
         // Is opaque hit found?
-        if( !geometryProps.IsTransparent( ) )
+        if( !geometryProps.Has( FLAG_TRANSPARENT ) ) // TODO: stop if pathThroughput is low
+            break;
+    }
+
+    // This is always non-transparent
+    MaterialProps materialProps = GetMaterialProps( geometryProps );
+
+    float4 Lcached = float4( materialProps.Lemi, 0.0 );
+    if( !geometryProps.IsSky( ) )
+    {
+        // L1 cache - reproject previous frame, carefully treating specular
+        float3 prevLdiff, prevLspec;
+        float reprojectionWeight = ReprojectIrradiance( false, !isReflection, gIn_ComposedDiff, gIn_ComposedSpec_ViewZ, geometryProps, desc.pixelPos, prevLdiff, prevLspec );
+        Lcached = float4( prevLdiff + prevLspec, reprojectionWeight );
+
+        // L2 cache - SHARC
+        HashGridParameters hashGridParams;
+        hashGridParams.cameraPosition = gCameraGlobalPos.xyz;
+        hashGridParams.sceneScale = SHARC_SCENE_SCALE;
+        hashGridParams.logarithmBase = SHARC_GRID_LOGARITHM_BASE;
+        hashGridParams.levelBias = SHARC_GRID_LEVEL_BIAS;
+
+        float3 Xglobal = GetGlobalPos( geometryProps.X );
+        uint level = HashGridGetLevel( Xglobal, hashGridParams );
+        float voxelSize = HashGridGetVoxelSize( level, hashGridParams );
+        float smc = GetSpecMagicCurve( materialProps.roughness );
+
+        float3x3 mBasis = Geometry::GetBasis( geometryProps.N );
+        float2 rndScaled = ( Rng::Hash::GetFloat2( ) - 0.5 ) * voxelSize * USE_SHARC_DITHERING;
+        Xglobal += mBasis[ 0 ] * rndScaled.x + mBasis[ 1 ] * rndScaled.y;
+
+        SharcHitData sharcHitData;
+        sharcHitData.positionWorld = Xglobal;
+        sharcHitData.normalWorld = geometryProps.N;
+        sharcHitData.emissive = materialProps.Lemi;
+
+        HashMapData hashMapData;
+        hashMapData.capacity = SHARC_CAPACITY;
+        hashMapData.hashEntriesBuffer = gInOut_SharcHashEntriesBuffer;
+
+        SharcParameters sharcParams;
+        sharcParams.gridParameters = hashGridParams;
+        sharcParams.hashMapData = hashMapData;
+        sharcParams.enableAntiFireflyFilter = SHARC_ANTI_FIREFLY;
+        sharcParams.voxelDataBuffer = gInOut_SharcVoxelDataBuffer;
+        sharcParams.voxelDataBufferPrev = gInOut_SharcVoxelDataBufferPrev;
+
+        bool isSharcAllowed = gSHARC && NRD_MODE < OCCLUSION; // trivial
+        isSharcAllowed &= Rng::Hash::GetFloat( ) > Lcached.w; // probabilistically estimate the need
+        isSharcAllowed &= geometryProps.hitT > voxelSize; // voxel angular size is acceptable // TODO: can be skipped to get flat ambient in some cases
+
+        float3 sharcRadiance;
+        if (isSharcAllowed && SharcGetCachedRadiance( sharcParams, sharcHitData, sharcRadiance, false))
+            Lcached = float4( sharcRadiance, 1.0 );
+
+        // Cache miss - compute lighting, if not found in caches
+        if( Rng::Hash::GetFloat( ) > Lcached.w )
         {
-            MaterialProps materialProps = GetMaterialProps( geometryProps );
-
-            // L1 cache - reproject previous frame, carefully treating specular
-            float3 prevLdiff, prevLspec;
-            float reprojectionWeight = ReprojectIrradiance( false, !isReflection, gIn_ComposedDiff, gIn_ComposedSpec_ViewZ, geometryProps, desc.pixelPos, prevLdiff, prevLspec );
-            float4 Lcached = float4( prevLdiff + prevLspec, reprojectionWeight );
-
-            // Compute lighting at hit point
-            if( Lcached.w != 1.0 )
-            {
-                float3 L = materialProps.Ldirect;
-                if( STL::Color::Luminance( L ) != 0 && !gDisableShadowsAndEnableImportanceSampling )
-                    L *= CastVisibilityRay_AnyHit( geometryProps.GetXoffset( ), gSunDirection_gExposure.xyz, 0.0, INF, GetConeAngleFromRoughness( geometryProps.mip, materialProps.roughness ), gWorldTlas, GEOMETRY_IGNORE_TRANSPARENT, 0 );
-
-                L += materialProps.Lemi;
-
-                // Ambient estimation at the end of the path
-                float3 BRDF = GetAmbientBRDF( geometryProps, materialProps );
-                BRDF *= 1.0 + EstimateDiffuseProbability( geometryProps, materialProps, true );
-
-                float3 Lamb = gIn_Ambient.SampleLevel( gLinearSampler, float2( 0.5, 0.5 ), 0 );
-                Lamb *= gAmbient;
-
-                L += Lamb * BRDF;
-
-                // Mix
-                Lcached.xyz = lerp( L, Lcached.xyz, Lcached.w );
-            }
-
-            // Output
-            return Lcached.xyz * pathThroughput;
+            float3 L = GetShadowedLighting( geometryProps, materialProps );
+            Lcached.xyz = max( Lcached.xyz, L );
         }
     }
 
-    // Should't be here
-    return 0.0;
+    // Output
+    return Lcached.xyz * pathThroughput;
 }
 
 //========================================================================================
 // MAIN
 //========================================================================================
 
-[numthreads( 16, 16, 1)]
+[numthreads( 16, 16, 1 )]
 void main( int2 pixelPos : SV_DispatchThreadId )
 {
-    // Do not generate NANs for unused threads
-    if( pixelPos.x >= gRectSize.x || pixelPos.y >= gRectSize.y )
-        return;
-
     float2 pixelUv = float2( pixelPos + 0.5 ) * gInvRectSize;
     float2 sampleUv = pixelUv + gJitter;
 
+    // Do not generate NANs for unused threads
+    if( pixelUv.x > 1.0 || pixelUv.y > 1.0 )
+        return;
+
     // Initialize RNG
-    STL::Rng::Hash::Initialize( pixelPos, gFrameIndex );
+    Rng::Hash::Initialize( pixelPos, gFrameIndex );
 
     // Composed without glass
     float3 diff = gIn_ComposedDiff[ pixelPos ];
-    float4 spec = gIn_ComposedSpec_ViewZ[ pixelPos ];
-    float3 Lsum = diff + spec.xyz * float( gOnScreen == SHOW_FINAL );
+    float3 spec = gIn_ComposedSpec_ViewZ[ pixelPos ].xyz;
+    float3 Lsum = diff + spec * float( gOnScreen == SHOW_FINAL );
 
     // Primary ray for transparent geometry only
     float3 cameraRayOrigin = ( float3 )0;
     float3 cameraRayDirection = ( float3 )0;
     GetCameraRay( cameraRayOrigin, cameraRayDirection, sampleUv );
 
-    float viewZ = gIn_ViewZ[ pixelPos ];
-    float3 Xv = STL::Geometry::ReconstructViewPosition( sampleUv, gCameraFrustum, viewZ, gViewDirection_gOrthoMode.w );
-    float tmin0 = gViewDirection_gOrthoMode.w == 0 ? length( Xv ) : abs( Xv.z );
+    float viewZAndTaaMask = gInOut_Mv[ pixelPos ].w;
+    float viewZ = Math::Sign( gNearZ ) * abs( viewZAndTaaMask ) / FP16_VIEWZ_SCALE; // viewZ before PSR
+    float3 Xv = Geometry::ReconstructViewPosition( sampleUv, gCameraFrustum, viewZ, gOrthoMode );
+    float tmin0 = gOrthoMode == 0 ? length( Xv ) : abs( Xv.z );
 
-    GeometryProps geometryPropsT = CastRay( cameraRayOrigin, cameraRayDirection, 0.0, tmin0, GetConeAngleFromRoughness( 0.0, 0.0 ), gWorldTlas, gTransparent == 0.0 ? 0 : GEOMETRY_ONLY_TRANSPARENT, 0 );
+    GeometryProps geometryPropsT = CastRay( cameraRayOrigin, cameraRayDirection, 0.0, tmin0, GetConeAngleFromRoughness( 0.0, 0.0 ), gWorldTlas, FLAG_TRANSPARENT, 0 );
 
     // Trace delta events
-    if( !geometryPropsT.IsSky( ) && geometryPropsT.tmin < tmin0 )
+    if( !geometryPropsT.IsSky( ) && geometryPropsT.hitT < tmin0 && gOnScreen == SHOW_FINAL )
     {
+        // Append "glass" mask to "hair" mask
+        viewZAndTaaMask = viewZAndTaaMask < 0.0 ? viewZAndTaaMask : -viewZAndTaaMask;
+
         // Patch motion vectors replacing MV for the background with MV for the closest glass layer.
         // IMPORTANT: surface-based motion can be used only if the object is curved.
         // TODO: let's use the simplest heuristic for now, but better switch to some "smart" interpolation between
         // MVs for the primary opaque surface hit and the primary glass surface hit.
-        if( geometryPropsT.curvature != 0.0 )
-        {
-            float3 motion = GetMotion( geometryPropsT.X, geometryPropsT.Xprev );
-            gInOut_Mv[ pixelPos ] = motion;
-        }
+        float3 mvT = GetMotion( geometryPropsT.X, geometryPropsT.Xprev );
+        gInOut_Mv[ pixelPos ] = float4( mvT, viewZAndTaaMask );
+
+        // Patch guides for RR
+        [branch]
+        if( gRR )
+            gOut_Normal_Roughness[ pixelPos ] = NRD_FrontEnd_PackNormalAndRoughness( geometryPropsT.N, 0.0, 0 );
 
         // Trace transparent stuff
         TraceTransparentDesc desc = ( TraceTransparentDesc )0;
         desc.geometryProps = geometryPropsT;
         desc.pixelPos = pixelPos;
-        desc.bounceNum = 10;
 
         // IMPORTANT: use 1 reflection path and 1 refraction path at the primary glass hit to significantly reduce noise
-        // TODO: use probabilistic split at the primary glass hit when denoising is available
+        // TODO: use probabilistic split at the primary glass hit when denoising becomes available
         desc.isReflection = true;
-        Lsum = TraceTransparent( desc );
+        float3 reflection = TraceTransparent( desc );
+        Lsum = reflection;
 
         desc.isReflection = false;
-        Lsum += TraceTransparent( desc );
+        float3 refraction = TraceTransparent( desc );
+        Lsum += refraction;
     }
 
-    // Output
-    float z = spec.w;
+    // Apply exposure
+    Lsum = ApplyExposure( Lsum );
 
-    gOut_Composed[ pixelPos ] = float4( Lsum, z );
+    // Output
+    gOut_Composed[ pixelPos ] = Lsum;
 }

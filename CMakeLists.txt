@@ -1,43 +1,45 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.30)
 
-# Options
-option(DISABLE_SHADER_COMPILATION "Disable shader compilation" OFF)
-option(USE_DXC_FROM_PACKMAN_ON_AARCH64 "Use DXC from Packman for `aarch64`" ON)
-set (SHADER_OUTPUT_PATH "${CMAKE_CURRENT_SOURCE_DIR}/_Shaders")
+include(FetchContent)
+
 option(DXR_OMM "Use DXR 1.2 API" ON)
 
 # Cached
-set(DXC_CUSTOM_PATH "custom/path/to/dxc" CACHE STRING "This DXC will be used if Vulkan SDK is not installed")
+option(USE_MINIMAL_DATA "Use minimal '_Data' (90MB)" OFF)
+
+set(SHADER_OUTPUT_PATH "${CMAKE_CURRENT_SOURCE_DIR}/_Shaders" CACHE STRING "")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/_Bin" CACHE STRING "")
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/_Bin" CACHE STRING "")
-set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "")
+
+get_property(IS_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+
+if(IS_MULTI_CONFIG)
+    set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "")
+endif()
 
 # Create project
 project(OMMSample LANGUAGES C CXX)
 
 # Globals?
-set_property (GLOBAL PROPERTY USE_FOLDERS ON)
+set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
-set (CMAKE_CXX_STANDARD 17)
-set (CMAKE_CXX_STANDARD_REQUIRED ON)
-set (CMAKE_C_STANDARD 99)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_C_STANDARD 99)
 
-if (MSVC)
-    set (CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-endif ()
-
-# Download dependencies using Packman
+# Download dependencies (Packman)
 if(WIN32)
     set(PACKMAN_EXT ".cmd")
+else()
+    set(PACKMAN_EXT ".sh")
 endif()
 
-if((CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64") OR (CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64"))
+if((CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64") OR(CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64"))
     if(WIN32)
         set(PACKMAN_PLATFORM "windows-x86_64")
     else()
         set(PACKMAN_PLATFORM "linux-x86_64")
     endif()
-elseif((CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64") OR (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64"))
+elseif((CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64") OR(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64"))
     set(PACKMAN_PLATFORM "linux-aarch64")
 else()
     message(FATAL_ERROR "Unsupported architecture: '${CMAKE_SYSTEM_PROCESSOR}'")
@@ -45,117 +47,204 @@ endif()
 
 message("Packman platform: ${PACKMAN_PLATFORM}")
 
-set(NRI_DATA_VERSION 2.3)
+if(USE_MINIMAL_DATA)
+    set(NRI_DATA_VERSION 2.3_minimal)
+    message("Using minimal '_Data'")
+else()
+    set(NRI_DATA_VERSION 2.3)
+endif()
 
-execute_process (COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/External/Packman/packman${PACKMAN_EXT}" pull "${CMAKE_CURRENT_SOURCE_DIR}/Dependencies.xml" -p ${PACKMAN_PLATFORM} -t nri_data_version=${NRI_DATA_VERSION}
+execute_process(COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/External/Packman/packman${PACKMAN_EXT}" pull "${CMAKE_CURRENT_SOURCE_DIR}/Dependencies.xml" -p ${PACKMAN_PLATFORM} -t nri_data_version=${NRI_DATA_VERSION}
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-    RESULT_VARIABLE PACKMAN_RESULT)
+    RESULT_VARIABLE PACKMAN_RESULT
+)
 
 if(NOT "${PACKMAN_RESULT}" STREQUAL "0")
     message(FATAL_ERROR "Packman failed(code = ${PACKMAN_RESULT})")
 endif()
 
-# Setup dependencies
-if((CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64") OR (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64"))
-    if(("${DXC_CUSTOM_PATH}" STREQUAL "") AND USE_DXC_FROM_PACKMAN_ON_AARCH64)
-        set(DXC_CUSTOM_PATH "${CMAKE_CURRENT_SOURCE_DIR}/External/DXC/bin/dxc" CACHE STRING "")
-    endif()
+# Download dependencies
+set(DEPS)
+
+# SHARC
+FetchContent_Declare(
+    sharc
+    GIT_REPOSITORY https://github.com/NVIDIA-RTX/SHARC.git
+    GIT_TAG main
+    GIT_SHALLOW 1
+)
+list(APPEND DEPS sharc)
+
+if(DEPS)
+    message("Downloading dependencies:")
+    message(STATUS "${DEPS} ...")
+
+    FetchContent_MakeAvailable(${DEPS})
 endif()
 
 # Compile options
+if(NOT((CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64") OR(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")))
+    set(SIMD -mssse3)
+endif()
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    set (COMPILE_OPTIONS -msse4.1 -Wextra)
+    set(COMPILE_OPTIONS ${SIMD} -Wextra -Wno-missing-field-initializers)
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-    set (COMPILE_OPTIONS -msse4.1 -Wextra)
+    set(COMPILE_OPTIONS ${SIMD} -Wextra -Wno-missing-field-initializers)
 elseif(MSVC)
-    set(COMPILE_OPTIONS /W4 /WX /wd4324)
+    set(COMPILE_OPTIONS /W4 /WX
+        /wd4324 # padding was added at the end of a structure because you specified an alignment specifier
+        /wd4834 # discarding return value of function with 'nodiscard' attribute
+    )
 else()
     message(WARNING "Unknown compiler!")
 endif()
 
 # Compile definitions
 if(WIN32)
-    set(COMPILE_DEFINITIONS WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS _UNICODE UNICODE)
+    set(COMPILE_DEFINITIONS WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
 endif()
 
 # External/NRIFramework
-set (NRIF_SHADERS_PATH "${SHADER_OUTPUT_PATH}" CACHE STRING "")
+option(SHADERMAKE_TOOL "" OFF)
+set(NRIF_SHADERS_PATH "${SHADER_OUTPUT_PATH}" CACHE STRING "")
+set(NRI_SHADERS_PATH "${SHADER_OUTPUT_PATH}" CACHE STRING "")
+
+option(NRI_ENABLE_NONE_SUPPORT "" OFF)
+option(NRI_ENABLE_D3D11_SUPPORT "" OFF)
+option(NRI_ENABLE_NIS_SDK "" ON)
+option(NRI_ENABLE_NGX_SDK "" ON)
+option(NRI_ENABLE_FFX_SDK "" ON)
+option(NRI_ENABLE_XESS_SDK "" ON)
 add_subdirectory("External/NRIFramework")
 
 # External/NRD
-set(NRD_DXC_CUSTOM_PATH ${DXC_CUSTOM_PATH} CACHE STRING "")
 set(NRD_SHADERS_PATH "${SHADER_OUTPUT_PATH}" CACHE STRING "")
 set(NRD_NORMAL_ENCODING "2" CACHE STRING "")
 set(NRD_ROUGHNESS_ENCODING "1" CACHE STRING "")
-option(NRD_DISABLE_SHADER_COMPILATION "" ${DISABLE_SHADER_COMPILATION})
-
+set(NRD_EMBEDS_DXBC_SHADERS "0" CACHE STRING "")
 add_subdirectory("External/NRD")
 
 # Opacity Micro-Maps
+set(OMM_VK_S_SHIFT 0 CACHE STRING "OMM_VK_S_SHIFT")
+set(OMM_VK_T_SHIFT 128 CACHE STRING "OMM_VK_T_SHIFT")
+set(OMM_VK_B_SHIFT 32 CACHE STRING "OMM_VK_B_SHIFT")
+set(OMM_VK_U_SHIFT 64 CACHE STRING "OMM_VK_U_SHIFT")
+set(DXC_PATH ${SHADERMAKE_DXC_PATH})
+set(DXC_SPIRV_PATH ${SHADERMAKE_DXC_VK_PATH})
 set(OMM_PROJECT_FOLDER "Opacity Micro-Map SDK")
 set(OMM_ENABLE_TESTS OFF CACHE BOOL "")
 set(OMM_BUILD_VIEWER OFF CACHE BOOL "")
 set(OMM_INTEGRATION_LAYER_NVRHI OFF CACHE BOOL "")
 set(OMM_STATIC_LIBRARY OFF CACHE BOOL "")
-set(OMM_OUTPUT_BIN_PATH "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
+set(OMM_OUTPUT_BIN_PATH "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 add_subdirectory("External/Opacity-MicroMap-SDK")
 
-# Creates a project for sample and adds dependent operations
+# Move dependencies into "External"
+function(fix_folders _DIRECTORY _FOLDER)
+    get_property(_TARGETS DIRECTORY "${_DIRECTORY}" PROPERTY BUILDSYSTEM_TARGETS)
+
+    foreach(_TARGET IN LISTS _TARGETS)
+        get_property(_FOLDER_ORIGINAL TARGET ${_TARGET} PROPERTY FOLDER)
+        set_property(TARGET ${_TARGET} PROPERTY FOLDER "${_FOLDER}/${_FOLDER_ORIGINAL}")
+    endforeach()
+
+    get_property(SUBDIRS DIRECTORY "${_DIRECTORY}" PROPERTY SUBDIRECTORIES)
+
+    foreach(SUBDIR IN LISTS SUBDIRS)
+        fix_folders("${SUBDIR}" "${_FOLDER}")
+    endforeach()
+endfunction()
+
+fix_folders("External/NRIFramework" "External")
+fix_folders("External/NRD" "External")
+
+# Get source directories for 3rd parties
+get_target_property(ML_SOURCE_DIR MathLib INTERFACE_INCLUDE_DIRECTORIES)
+get_target_property(NRI_SOURCE_DIR NRI SOURCE_DIR)
+get_target_property(NRD_SOURCE_DIR NRD SOURCE_DIR)
+
+# OMM sample
 file(GLOB OMM_SAMPLE_SOURCE "Source/*.cpp" "Source/*.hpp")
 source_group("" FILES ${OMM_SAMPLE_SOURCE})
 
-file(GLOB NRD_INTEGRATION_HEADERS "External/NRD/Integration/*.h" "External/NRD/Integration/*.hpp")
-source_group("NRD Integration" FILES ${NRD_INTEGRATION_HEADERS})
-
-add_executable(${PROJECT_NAME} ${OMM_SAMPLE_SOURCE} ${NRD_INTEGRATION_HEADERS})
-target_include_directories(${PROJECT_NAME} PRIVATE "Source" "External")
-target_include_directories(${PROJECT_NAME} PRIVATE "External/NRIFramework/Include")
-target_include_directories(${PROJECT_NAME} PRIVATE "External/NRIFramework/External/NRI/Include")
-target_include_directories(${PROJECT_NAME} PRIVATE "External/NRIFramework/External")
-target_include_directories(${PROJECT_NAME} PRIVATE "External/NRD/Include" "External/NRD/Integration")
-target_include_directories(${PROJECT_NAME} PRIVATE "External/omm_bake/libraries/omm-lib/include")
-target_compile_definitions (${PROJECT_NAME} PRIVATE ${COMPILE_DEFINITIONS} PROJECT_NAME=${PROJECT_NAME} NRD_NORMAL_ENCODING=${NRD_NORMAL_ENCODING} NRD_ROUGHNESS_ENCODING=${NRD_ROUGHNESS_ENCODING} DXC_PATH=${DXC_PATH} DXC_SPIRV_PATH=${DXC_SPIRV_PATH})
-target_compile_options(${PROJECT_NAME} PRIVATE ${COMPILE_OPTIONS})
-
-target_link_libraries(${PROJECT_NAME} PRIVATE NRIFramework NRI NRD omm-lib)
+add_executable(${PROJECT_NAME} ${OMM_SAMPLE_SOURCE})
 
 if (DXR_OMM)
-    # DXR 1.2 API
-    set(D3D_AGILITY_SDK_VERSION 616)
-    set(D3D_AGILITY_SDK_FULL_VERSION 1.${D3D_AGILITY_SDK_VERSION}.0)
-    
-    if(NOT DEFINED D3D_AGILITY_SDK_PATH)
-        set(D3D_AGILITY_SDK_PATH "${CMAKE_CURRENT_SOURCE_DIR}/External/AgilitySDK")
-
-        include(FetchContent)
-        FetchContent_Declare(
-            DirectX-Agility-SDK
-            URL            "https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/${D3D_AGILITY_SDK_FULL_VERSION}"
-            SOURCE_DIR     "${D3D_AGILITY_SDK_PATH}"
-            DOWNLOAD_EXTRACT_TIMESTAMP ON
-        )
-        FetchContent_MakeAvailable(DirectX-Agility-SDK)
-    endif()
-
+# DXR 1.2 API. AgilitySDK is handled by NRI
     target_compile_definitions(${PROJECT_NAME} PRIVATE DXR_OMM=1)
-    target_compile_definitions(${PROJECT_NAME} PRIVATE D3D_AGILITY_SDK_VERSION=${D3D_AGILITY_SDK_VERSION})    
-    target_include_directories(${PROJECT_NAME} PRIVATE ${D3D_AGILITY_SDK_PATH}/build/native/include)
 
-    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:${PROJECT_NAME}>/D3D12
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${D3D_AGILITY_SDK_PATH}/build/native/bin/x64/D3D12Core.dll $<TARGET_FILE_DIR:${PROJECT_NAME}>/D3D12
-        COMMAND "$<$<CONFIG:Debug>:${CMAKE_COMMAND}>" "$<$<CONFIG:Debug>:-E>" "$<$<CONFIG:Debug>:copy_if_different>" "$<$<CONFIG:Debug>:${D3D_AGILITY_SDK_PATH}/build/native/bin/x64/d3d12SDKLayers.dll>" "$<$<CONFIG:Debug>:$<TARGET_FILE_DIR:${PROJECT_NAME}>/D3D12>"
+    set(ASDK_DEP)
+
+    FetchContent_Declare(
+        agilitysdk
+        DOWNLOAD_EXTRACT_TIMESTAMP 1
+        DOWNLOAD_NO_PROGRESS 1
+        URL https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.${NRI_AGILITY_SDK_VERSION_MAJOR}.${NRI_AGILITY_SDK_VERSION_MINOR}
     )
+    list(APPEND ASDK_DEP agilitysdk)
+
+    if(ASDK_DEP)
+        message(STATUS "Downloading ${ASDK_DEP}")
+        FetchContent_MakeAvailable(${ASDK_DEP})
+        target_include_directories(${PROJECT_NAME} PRIVATE "${agilitysdk_SOURCE_DIR}")
+    else()
+        message(FATAL_ERROR "AgilitySDK Failed")
+    endif()
 else()
     # NVAPI
-    find_library(INPUT_NVAPI_LIB NAMES nvapi64.lib PATHS "External/NRIFramework/External/NRI/External/nvapi/amd64")
-    if (INPUT_NVAPI_LIB)
-        target_link_libraries(${PROJECT_NAME} PRIVATE ${INPUT_NVAPI_LIB})
-    else()
-        message(WARNING "Can't find NVAPI64 DLL.")
+    set(NVAPI_DEP)
+    FetchContent_Declare(
+        nvapi
+        GIT_REPOSITORY https://github.com/NVIDIA/nvapi.git
+        GIT_TAG main
+        GIT_SHALLOW 1
+    )
+    list(APPEND NVAPI_DEP nvapi)
+
+    if(NVAPI_DEP)
+        message(STATUS "Downloading ${NVAPI_DEP}")
+        FetchContent_MakeAvailable(${NVAPI_DEP})
     endif()
-    target_include_directories(${PROJECT_NAME} PRIVATE "External/NRIFramework/External/NRI/External/nvapi")
+
+    find_library(NVAPI_LIB NAMES nvapi64 nvapi PATHS "${nvapi_SOURCE_DIR}/amd64" REQUIRED)
+    if (NVAPI_LIB)
+        set(NVAPI_LIB_PATH "${nvapi_SOURCE_DIR}/amd64/nvapi64.lib")
+        target_link_libraries(${PROJECT_NAME} PRIVATE ${NVAPI_LIB_PATH})
+        target_include_directories(${PROJECT_NAME} PRIVATE "${nvapi_SOURCE_DIR}")
+    else()
+        message(FATAL_ERROR "Can't find NVAPI64 LIB")
+    endif()
 endif()
+
+target_include_directories(${PROJECT_NAME} PRIVATE
+    "Source"
+    "External"
+    "External/omm_bake/libraries/omm-lib/include"
+    "$ENV{VULKAN_SDK}/include"
+)
+
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    ${COMPILE_DEFINITIONS}
+    PROJECT_NAME=${PROJECT_NAME}
+    NRD_NORMAL_ENCODING=${NRD_NORMAL_ENCODING}
+    NRD_ROUGHNESS_ENCODING=${NRD_ROUGHNESS_ENCODING}
+    SHADERMAKE_PATH=${SHADERMAKE_PATH}
+    SHADERMAKE_DXC_PATH=${SHADERMAKE_DXC_PATH}
+    SHADERMAKE_DXC_VK_PATH=${SHADERMAKE_DXC_VK_PATH}
+    ML_SOURCE_DIR=${ML_SOURCE_DIR}
+    NRI_SOURCE_DIR=${NRI_SOURCE_DIR}/Include
+    NRD_SOURCE_DIR=${NRD_SOURCE_DIR}/Shaders/Include
+    SHARC_SOURCE_DIR=${sharc_SOURCE_DIR}/include
+)
+target_compile_options(${PROJECT_NAME} PRIVATE ${COMPILE_OPTIONS})
+
+target_link_libraries(${PROJECT_NAME} PRIVATE
+    NRIFramework
+    NRD
+    NRDIntegration
+    omm-lib
+)
 
 if(UNIX)
     target_link_libraries(${PROJECT_NAME} PRIVATE ${CMAKE_DL_LIBS} pthread X11)
@@ -170,74 +259,53 @@ if(WIN32 AND MSVC)
     configure_file(.args "${CMAKE_BINARY_DIR}/${PROJECT_NAME}.args.json" COPYONLY)
 endif()
 
-# Function - copy a library to the output folder of the project
-function (copy_library PROJECT LIBRARY_NAME)
-    add_custom_command (TARGET ${PROJECT} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${LIBRARY_NAME} $<TARGET_FILE_DIR:${PROJECT}>
-        COMMAND_EXPAND_LISTS)
-endfunction ()
-
-# DLSS
-if(WIN32)
-    find_library(NGX_DEBUG_LIB NAMES nvsdk_ngx_s_dbg.lib PATHS "External/NGX/lib/Windows_x86_64/x86_64")
-    find_library(NGX_RELEASE_LIB NAMES nvsdk_ngx_s.lib PATHS "External/NGX/lib/Windows_x86_64/x86_64")
-    find_file(NGX_DLL NAMES nvngx_dlss.dll PATHS "External/NGX/lib/Windows_x86_64/rel")
-else()
-    find_library(NGX_DEBUG_LIB NAMES libnvsdk_ngx.a PATHS "External/NGX/lib/Linux_x86_64")
-    find_library(NGX_RELEASE_LIB NAMES libnvsdk_ngx.a PATHS "External/NGX/lib/Linux_x86_64")
-    find_file (NGX_DLL NAMES libnvidia-ngx-dlss.so.3.1.1 PATHS "External/NGX/lib/Linux_x86_64/rel")
-endif()
-
-if(NGX_DEBUG_LIB AND NGX_RELEASE_LIB AND NGX_DLL)
-    target_include_directories(${PROJECT_NAME} PRIVATE "External/NRIFramework/External/NRI/External/vulkan/include")
-    target_link_libraries(${PROJECT_NAME} PRIVATE debug ${NGX_DEBUG_LIB})
-    target_link_libraries(${PROJECT_NAME} PRIVATE optimized ${NGX_RELEASE_LIB})
-
-    copy_library(${PROJECT_NAME} ${NGX_DLL})
-
-    file(GLOB DLSS_INTEGRATION_HEADERS "Source/DLSS/*.h" "Source/DLSS/*.hpp")
-    source_group("DLSS Integration" FILES ${DLSS_INTEGRATION_HEADERS})
-    target_sources(${PROJECT_NAME} PRIVATE ${DLSS_INTEGRATION_HEADERS})
-else()
-    message(FATAL_ERROR "Can't find NGX LIB/DLL")
-endif()
-
 # Shaders
-file (GLOB_RECURSE SHADERS "Shaders/*.hlsl" "Shaders/*.hlsli" "External/NRD/External/MathLib/*.hlsli")
+file(GLOB_RECURSE SHADERS
+    "Shaders/*.hlsl"
+    "Shaders/*.hlsli"
+)
 set_source_files_properties(${SHADERS} PROPERTIES VS_TOOL_OVERRIDE "None")
 
-set (SHADERMAKE_GENERAL_ARGS
-    --useAPI --binary --flatten --stripReflection --WX
-        --sourceDir "Shaders"
-        -c Shaders.cfg
-        -o "${SHADER_OUTPUT_PATH}"
-        -I "Shaders"
-        -I "External"
-        -I "External/NGX"
-        -I "External/NRD/External"
-        -D COMPILER_DXC
-        -D NRD_NORMAL_ENCODING=${NRD_NORMAL_ENCODING}
-        -D NRD_ROUGHNESS_ENCODING=${NRD_ROUGHNESS_ENCODING}
+set(SHADERMAKE_GENERAL_ARGS
+    --project "OMMSample"
+    --compactProgress
+    --flatten
+    --stripReflection
+    --WX
+    --sRegShift 0 --bRegShift 32 --uRegShift 64 --tRegShift 128 # TODO: must be in sync with "VK_BINDING_OFFSETS"
+    --binary
+    --shaderModel 6_6
+    --sourceDir "Shaders"
+    --ignoreConfigDir
+    -c "Shaders/Shaders.cfg"
+    -o "${SHADER_OUTPUT_PATH}"
+    -I "Shaders"
+    -I "External"
+    -I "${ML_SOURCE_DIR}"
+    -I "${NRD_SOURCE_DIR}/Shaders/Include"
+    -I "${NRI_SOURCE_DIR}/Include"
+    -I "${sharc_SOURCE_DIR}/include"
+    -D NRD_NORMAL_ENCODING=${NRD_NORMAL_ENCODING}
+    -D NRD_ROUGHNESS_ENCODING=${NRD_ROUGHNESS_ENCODING}
 )
 
-if (WIN32)
-    add_custom_target (${PROJECT_NAME}_Shaders ALL
-        COMMAND ShaderMake ${SHADERMAKE_GENERAL_ARGS} -p DXIL --compiler "${DXC_PATH}"
-        COMMAND ShaderMake ${SHADERMAKE_GENERAL_ARGS} -p SPIRV --compiler "${DXC_SPIRV_PATH}" -D VULKAN --hlsl2021 --sRegShift 100 --tRegShift 200 --bRegShift 300 --uRegShift 400
-        DEPENDS ShaderMake
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        VERBATIM
-        SOURCES ${SHADERS}
-    )
-else ()
-    add_custom_target (${PROJECT_NAME}_Shaders ALL
-        COMMAND ShaderMake ${SHADERMAKE_GENERAL_ARGS} -p SPIRV --compiler "${DXC_SPIRV_PATH}" -D VULKAN --hlsl2021 --sRegShift 100 --tRegShift 200 --bRegShift 300 --uRegShift 400
-        DEPENDS ShaderMake
+set(SHADERMAKE_COMMANDS "")
+
+if(NRI_ENABLE_D3D12_SUPPORT)
+    set(SHADERMAKE_COMMANDS ${SHADERMAKE_COMMANDS} COMMAND ${SHADERMAKE_PATH} -p DXIL --compiler "${SHADERMAKE_DXC_PATH}" ${SHADERMAKE_GENERAL_ARGS})
+endif()
+
+if(NRI_ENABLE_VK_SUPPORT)
+    set(SHADERMAKE_COMMANDS ${SHADERMAKE_COMMANDS} COMMAND ${SHADERMAKE_PATH} -p SPIRV --compiler "${SHADERMAKE_DXC_VK_PATH}" ${SHADERMAKE_GENERAL_ARGS})
+endif()
+
+add_custom_target(${PROJECT_NAME}Shaders ALL
+    ${SHADERMAKE_COMMANDS}
+    DEPENDS ShaderMake
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     VERBATIM
     SOURCES ${SHADERS}
 )
-endif ()
 
 # Opacity Micro-Map integration files
 if (TARGET omm-lib)
@@ -250,5 +318,5 @@ if (TARGET omm-lib)
     target_sources(${PROJECT_NAME}  PRIVATE ${PROFILER_FILES})
 endif()
 
-set_property (TARGET ${PROJECT_NAME}_Shaders PROPERTY FOLDER "Sample")
-add_dependencies (${PROJECT_NAME} ${PROJECT_NAME}_Shaders)
+set_property(TARGET ${PROJECT_NAME}Shaders PROPERTY FOLDER "Sample")
+add_dependencies(${PROJECT_NAME} ${PROJECT_NAME}Shaders)

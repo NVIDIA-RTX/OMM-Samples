@@ -47,11 +47,10 @@ compile_commands.json
 *.manifest
 
 # external packages
-External/Detex/
-External/Glfw/
+External/NRD/
+External/NRIFramework/
 External/ImGui/
-External/vulkansdk/
-External/DXC/
+External/Opacity-MicroMap-SDK/
 
 # generated folders
 _Bin/

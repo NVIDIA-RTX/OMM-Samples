@@ -13,7 +13,7 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 #include <vector>
 #include <array>
 #include "NRI.h"
-#include "NRI/Include/Extensions/NRIHelper.h"
+#include "Extensions/NRIHelper.h"
 
 #define PROFILER_BUFFERED_FRAME_NUM 3 //TODO: this should be part of the profiler initialization.
 
@@ -163,13 +163,13 @@ void Profiler::Init(nri::Device* device)
 {
     NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*device, NRI_INTERFACE(nri::CoreInterface), (nri::CoreInterface*)&m_NRI));
     NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*device, NRI_INTERFACE(nri::HelperInterface), (nri::HelperInterface*)&m_NRI));
-    nri::CommandQueue* commandQueue = nullptr;
-    m_NRI.GetCommandQueue(*device, nri::CommandQueueType::GRAPHICS, commandQueue);
+    nri::Queue* commandQueue = nullptr;
+    m_NRI.GetQueue(*device, nri::QueueType::GRAPHICS, 0, commandQueue);
 
     //Query Buffers
     nri::BufferDesc bufferDesc = {};
     bufferDesc.size = m_QueryBufferSize;
-    bufferDesc.usageMask = nri::BufferUsageBits::NONE;
+    bufferDesc.usage = nri::BufferUsageBits::NONE;
     bufferDesc.structureStride = sizeof(uint64_t);
     for (uint32_t i = 0; i < PROFILER_BUFFERED_FRAME_NUM; ++i)
         NRI_ABORT_ON_FAILURE(m_NRI.CreateBuffer(*device, bufferDesc, m_QueryBuffers[i]));
@@ -189,19 +189,17 @@ void Profiler::Init(nri::Device* device)
     nri::QueryPoolDesc queryPoolDesc = {};
     queryPoolDesc.queryType = nri::QueryType::TIMESTAMP;
     queryPoolDesc.capacity = m_QueriesNum;
-    queryPoolDesc.pipelineStatsMask = {};
-    queryPoolDesc.physicalDeviceMask = nri::WHOLE_DEVICE_GROUP;
     for (uint32_t i = 0; i < PROFILER_BUFFERED_FRAME_NUM; ++i)
         NRI_ABORT_ON_FAILURE(m_NRI.CreateQueryPool(*device, queryPoolDesc, m_QueryPools[i]));
 
-    m_TimestampFrequencyHz = m_NRI.GetDeviceDesc(*device).timestampFrequencyHz;
+    m_TimestampFrequencyHz = m_NRI.GetDeviceDesc(*device).other.timestampFrequencyHz;
     nri::CommandAllocator* commandAllocator = nullptr;
     nri::CommandBuffer* commandBuffer = nullptr;
-    NRI_ABORT_ON_FAILURE(m_NRI.CreateCommandAllocator(*commandQueue, nri::WHOLE_DEVICE_GROUP, commandAllocator));
+    NRI_ABORT_ON_FAILURE(m_NRI.CreateCommandAllocator( *commandQueue, commandAllocator));
     NRI_ABORT_ON_FAILURE(m_NRI.CreateCommandBuffer(*commandAllocator, commandBuffer));
 
     m_NRI.ResetCommandAllocator(*commandAllocator);
-    m_NRI.BeginCommandBuffer(*commandBuffer, nullptr, 0);
+    m_NRI.BeginCommandBuffer(*commandBuffer, nullptr);
     {
         for (uint32_t i = 0; i < PROFILER_BUFFERED_FRAME_NUM; ++i)
         {

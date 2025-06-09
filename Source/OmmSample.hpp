@@ -1,37 +1,25 @@
-/*
-Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
-
-NVIDIA CORPORATION and its licensors retain all intellectual property
-and proprietary rights in and to this software, related documentation
-and any modifications thereto. Any use, reproduction, disclosure or
-distribution of this software and related documentation without an express
-license agreement from NVIDIA CORPORATION is strictly prohibited.
-*/
-
-#include <set>
-#include <map>
+// © 2022 NVIDIA Corporation
 #include <future>
+#include <map>
+#include <set>
 #include "VisibilityMasks/OmmHelper.h"
 
 #include "NRIFramework.h"
 
 #include "Extensions/NRIRayTracing.h"
-#include "Extensions/NRIWrapperD3D11.h"
 #include "Extensions/NRIWrapperD3D12.h"
 #include "Extensions/NRIWrapperVK.h"
 
+// NRD and NRI-based integration
 #include "NRD.h"
 #include "NRDIntegration.hpp"
 
-#include "DLSS/DLSSIntegration.hpp"
-#include "NGX/NVIDIAImageScaling/NIS/NIS_Config.h"
-
-#include "Detex/detex.h"
+#include "../Detex/detex.h"
 #include "Profiler/NriProfiler.hpp"
 
 #ifdef _WIN32
-    #undef APIENTRY
-    #include <windows.h>
+#    undef APIENTRY
+#    include <windows.h>
 #endif
 
 //=================================================================================
@@ -41,91 +29,94 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 // NRD mode and other shared settings are here
 #include "../Shaders/Include/Shared.hlsli"
 
-constexpr uint32_t MAX_ANIMATED_INSTANCE_NUM        = 512;
-constexpr auto BLAS_RIGID_MESH_BUILD_BITS           = nri::AccelerationStructureBuildBits::PREFER_FAST_TRACE;
-constexpr auto BLAS_DEFORMABLE_MESH_BUILD_BITS      = nri::AccelerationStructureBuildBits::PREFER_FAST_BUILD | nri::AccelerationStructureBuildBits::ALLOW_UPDATE;
-constexpr auto TLAS_BUILD_BITS                      = nri::AccelerationStructureBuildBits::PREFER_FAST_TRACE;
-constexpr float ACCUMULATION_TIME                   = 0.5f; // seconds
-constexpr float NEAR_Z                              = 0.001f; // m
-constexpr float GLASS_THICKNESS                     = 0.002f; // m
-constexpr float CAMERA_BACKWARD_OFFSET              = 0.0f; // m, 3rd person camera offset
-constexpr bool CAMERA_RELATIVE                      = true;
-constexpr bool ALLOW_BLAS_MERGING                   = true;
-constexpr bool NRD_ALLOW_DESCRIPTOR_CACHING         = true;
-constexpr int32_t MAX_HISTORY_FRAME_NUM             = (int32_t)std::min(60u, std::min(nrd::REBLUR_MAX_HISTORY_FRAME_NUM, nrd::RELAX_MAX_HISTORY_FRAME_NUM));
-constexpr uint32_t TEXTURES_PER_MATERIAL            = 4;
-constexpr uint32_t MAX_TEXTURE_TRANSITIONS_NUM      = 32;
-constexpr uint32_t DYNAMIC_CONSTANT_BUFFER_SIZE     = 1024 * 1024; // 1MB
-constexpr uint32_t MAX_ANIMATION_HISTORY_FRAME_NUM  = 2;
+constexpr uint32_t MAX_ANIMATED_INSTANCE_NUM = 512;
+constexpr auto BLAS_RIGID_MESH_BUILD_BITS = nri::AccelerationStructureBits::PREFER_FAST_TRACE | nri::AccelerationStructureBits::ALLOW_COMPACTION;
+constexpr auto BLAS_DEFORMABLE_MESH_BUILD_BITS = nri::AccelerationStructureBits::PREFER_FAST_BUILD | nri::AccelerationStructureBits::ALLOW_UPDATE | nri::AccelerationStructureBits::ALLOW_COMPACTION;
+constexpr auto TLAS_BUILD_BITS = nri::AccelerationStructureBits::PREFER_FAST_TRACE;
+constexpr float ACCUMULATION_TIME = 0.5f;      // seconds
+constexpr float NEAR_Z = 0.001f;               // m
+constexpr float GLASS_THICKNESS = 0.002f;      // m
+constexpr float CAMERA_BACKWARD_OFFSET = 0.0f; // m, 3rd person camera offset
+constexpr float NIS_SHARPNESS = 0.2f;
+constexpr bool CAMERA_RELATIVE = true;
+constexpr bool ALLOW_BLAS_MERGING = true;
+constexpr bool ALLOW_HDR = false;                   // use "WIN + ALT + B" to switch HDR mode
+constexpr bool USE_LOW_PRECISION_FP_FORMATS = true; // saves a bit of memory and performance
+constexpr bool USE_DLSS_TNN = false;                // replace CNN (legacy) with TNN (better)
+constexpr nri::UpscalerType upscalerType = nri::UpscalerType::DLSR;
+constexpr bool NRD_ENABLE_WHOLE_LIFETIME_DESCRIPTOR_CACHING = true;
+constexpr bool NRD_RESTORE_INITIAL_STATE = false;
+constexpr bool NRD_USE_AUTO_WRAPPER = false;
+constexpr bool NRD_PROMOTE_FLOAT16_TO_32 = false;
+constexpr bool NRD_DEMOTE_FLOAT32_TO_16 = false;
+constexpr int32_t MAX_HISTORY_FRAME_NUM = (int32_t)std::min(60u, std::min(nrd::REBLUR_MAX_HISTORY_FRAME_NUM, nrd::RELAX_MAX_HISTORY_FRAME_NUM));
+constexpr uint32_t TEXTURES_PER_MATERIAL = 4;
+constexpr uint32_t MAX_TEXTURE_TRANSITIONS_NUM = 32;
+constexpr uint32_t DYNAMIC_CONSTANT_BUFFER_SIZE = 1024 * 1024; // 1MB
+constexpr uint32_t MAX_ANIMATION_HISTORY_FRAME_NUM = 2;
+
+#if (SIGMA_TRANSLUCENT == 1)
+#    define SIGMA_VARIANT nrd::Denoiser::SIGMA_SHADOW_TRANSLUCENCY
+#else
+#    define SIGMA_VARIANT nrd::Denoiser::SIGMA_SHADOW
+#endif
 
 //=================================================================================
 // Important tests, sensitive to regressions or just testing base functionality
 //=================================================================================
 
-const std::vector<uint32_t> interior_checkMeTests =
-{{
-    1, 3, 6, 8, 9, 10, 12, 13, 14, 23, 27, 28, 29, 31, 32, 35, 43, 44, 47, 53,
+const std::vector<uint32_t> interior_checkMeTests = {{1, 3, 6, 8, 9, 10, 12, 13, 14, 23, 27, 28, 29, 31, 32, 35, 43, 44, 47, 53,
     59, 60, 62, 67, 75, 76, 79, 81, 95, 96, 107, 109, 111, 110, 114, 120, 124,
     126, 127, 132, 133, 134, 139, 140, 142, 145, 148, 150, 155, 156, 157, 160,
-    161, 162, 164, 168, 169, 171, 172, 173, 174
-}};
+    161, 162, 164, 168, 169, 171, 172, 173, 174}};
 
 //=================================================================================
 // Tests, where IQ improvement would be "nice to have"
 //=================================================================================
 
-const std::vector<uint32_t> REBLUR_interior_improveMeTests =
-{{
-    108, 153, 174, 191, 192
+const std::vector<uint32_t> REBLUR_interior_improveMeTests = {{108, 110, 153, 174, 191, 192}};
+
+const std::vector<uint32_t> RELAX_interior_improveMeTests = {{114, 144, 148, 156, 159}};
+
+const std::vector<uint32_t> DLRR_interior_improveMeTests = {{
+    1, 6, 159,   // snappy specular tracking
+    4, 181,      // boily reaction to importance sampling
+    62, 98, 112, // diffuse missing details and ghosting
+    185, 186,    // missing material details (low confidence reprojection)
+    220,         // patterns
+    221,         // ortho
+    222,         // diffuse darkening
 }};
 
-const std::vector<uint32_t> RELAX_interior_improveMeTests =
-{{
-    96, 114, 144, 148, 156, 159
-}};
+// TODO: add tests for SIGMA, active when "Shadow" visualization is on
 
 //=================================================================================
 
-#define _STRINGIFY(x) #x
-#define STRINGIFY(x) _STRINGIFY(x)
-
 // UI
-#define UI_YELLOW                                   ImVec4(1.0f, 0.9f, 0.0f, 1.0f)
-#define UI_GREEN                                    ImVec4(0.5f, 0.9f, 0.0f, 1.0f)
-#define UI_RED                                      ImVec4(1.0f, 0.1f, 0.0f, 1.0f)
-#define UI_HEADER                                   ImVec4(0.7f, 1.0f, 0.7f, 1.0f)
-#define UI_HEADER_BACKGROUND                        ImVec4(0.7f * 0.3f, 1.0f * 0.3f, 0.7f * 0.3f, 1.0f)
-#define UI_DEFAULT                                  ImGui::GetStyleColorVec4(ImGuiCol_Text)
+#define UI_YELLOW            ImVec4(1.0f, 0.9f, 0.0f, 1.0f)
+#define UI_GREEN             ImVec4(0.5f, 0.9f, 0.0f, 1.0f)
+#define UI_RED               ImVec4(1.0f, 0.1f, 0.0f, 1.0f)
+#define UI_HEADER            ImVec4(0.7f, 1.0f, 0.7f, 1.0f)
+#define UI_HEADER_BACKGROUND ImVec4(0.7f * 0.3f, 1.0f * 0.3f, 0.7f * 0.3f, 1.0f)
+#define UI_DEFAULT           ImGui::GetStyleColorVec4(ImGuiCol_Text)
 
-enum MvType : int32_t
-{
+enum MvType : int32_t {
     MV_2D,
     MV_25D,
-    MV_3D,
 };
 
-enum class AccelerationStructure : uint32_t
-{
+enum class AccelerationStructure : uint32_t {
     TLAS_World,
     TLAS_Emissive,
 
-    BLAS_StaticOpaque,
-    BLAS_StaticTransparent,
-    BLAS_StaticEmissive,
-
-    BLAS_Other // all other BLAS start from here
+    BLAS_MergedOpaque,
+    BLAS_MergedTransparent,
+    BLAS_MergedEmissive,
+    BLAS_Other
 };
 
-enum class Buffer : uint32_t
-{
-    // HOST_UPLOAD
-    GlobalConstants,
-    DynamicConstants,
-    InstanceDataStaging,
-    WorldTlasDataStaging,
-    LightTlasDataStaging,
-
-    // DEVICE. read only
+enum class Buffer : uint32_t {
+    // DEVICE (read only)
     InstanceData,
     MorphMeshIndices,
     MorphMeshVertices,
@@ -133,16 +124,20 @@ enum class Buffer : uint32_t
     // DEVICE
     MorphedPositions,
     MorphedAttributes,
-    MorphedPrimitivePrevData,
+    MorphedPrimitivePrevPositions,
     PrimitiveData,
+    SharcHashEntries,
+    SharcHashCopyOffset,
+    SharcVoxelDataPing,
+    SharcVoxelDataPong,
+
+    // DEVICE (scratch)
     WorldScratch,
     LightScratch,
     MorphMeshScratch,
 };
 
-enum class Texture : uint32_t
-{
-    Ambient,
+enum class Texture : uint32_t {
     ViewZ,
     Mv,
     Normal_Roughness,
@@ -153,14 +148,12 @@ enum class Texture : uint32_t
     Shadow,
     Diff,
     Spec,
-    Unfiltered_ShadowData,
+    Unfiltered_Penumbra,
     Unfiltered_Diff,
     Unfiltered_Spec,
-    Unfiltered_Shadow_Translucency,
+    Unfiltered_Translucency,
     Validation,
-    Composed_ViewZ,
-    DlssOutput,
-    Final,
+    Composed,
 
     // History
     ComposedDiff,
@@ -168,8 +161,21 @@ enum class Texture : uint32_t
     TaaHistory,
     TaaHistoryPrev,
 
+    // RR guides
+    RRGuide_DiffAlbedo,
+    RRGuide_SpecAlbedo,
+    RRGuide_SpecHitDistance,
+    RRGuide_Normal_Roughness, // only RGBA16f encoding is supported
+
+    // Output resolution
+    DlssOutput,
+    PreFinal,
+
+    // Window resolution
+    Final,
+
     // SH
-#if( NRD_MODE == SH )
+#if (NRD_MODE == SH)
     Unfiltered_DiffSh,
     Unfiltered_SpecSh,
     DiffSh,
@@ -177,41 +183,35 @@ enum class Texture : uint32_t
 #endif
 
     // Read-only
-    NisData1,
-    NisData2,
     MaterialTextures,
-
-    MAX_NUM,
-
-    // Aliases
-    DlssInput = Unfiltered_Diff
 };
 
-enum class Pipeline : uint32_t
-{
+enum class Pipeline : uint32_t {
     MorphMeshUpdateVertices,
     MorphMeshUpdatePrimitives,
-    TraceAmbient,
+    SharcUpdate,
+    SharcResolve,
+    SharcHashCopy,
     TraceOpaque,
     Composition,
     TraceTransparent,
-    Temporal,
-    Upsample,
-    UpsampleNis,
-    PreDlss,
-    AfterDlss,
-
-    MAX_NUM,
+    Taa,
+    Final,
+    DlssBefore,
+    DlssAfter,
 };
 
-enum class Descriptor : uint32_t
-{
+enum class Descriptor : uint32_t {
     World_AccelerationStructure,
     Light_AccelerationStructure,
 
     LinearMipmapLinear_Sampler,
     LinearMipmapNearest_Sampler,
     NearestMipmapNearest_Sampler,
+
+    Global_ConstantBuffer,
+    MorphTargetPose_ConstantBuffer,
+    MorphTargetUpdatePrimitives_ConstantBuffer,
 
     InstanceData_Buffer,
     MorphMeshIndices_Buffer,
@@ -226,8 +226,11 @@ enum class Descriptor : uint32_t
     PrimitiveData_Buffer,
     PrimitiveData_StorageBuffer,
 
-    Ambient_Texture,
-    Ambient_StorageTexture,
+    SharcHashEntries_StorageBuffer,
+    SharcHashCopyOffset_StorageBuffer,
+    SharcVoxelDataPing_StorageBuffer,
+    SharcVoxelDataPong_StorageBuffer,
+
     ViewZ_Texture,
     ViewZ_StorageTexture,
     Mv_Texture,
@@ -248,22 +251,18 @@ enum class Descriptor : uint32_t
     Diff_StorageTexture,
     Spec_Texture,
     Spec_StorageTexture,
-    Unfiltered_ShadowData_Texture,
-    Unfiltered_ShadowData_StorageTexture,
+    Unfiltered_Penumbra_Texture,
+    Unfiltered_Penumbra_StorageTexture,
     Unfiltered_Diff_Texture,
     Unfiltered_Diff_StorageTexture,
     Unfiltered_Spec_Texture,
     Unfiltered_Spec_StorageTexture,
-    Unfiltered_Shadow_Translucency_Texture,
-    Unfiltered_Shadow_Translucency_StorageTexture,
+    Unfiltered_Translucency_Texture,
+    Unfiltered_Translucency_StorageTexture,
     Validation_Texture,
     Validation_StorageTexture,
-    Composed_ViewZ_Texture,
-    Composed_ViewZ_StorageTexture,
-    DlssOutput_Texture,
-    DlssOutput_StorageTexture,
-    Final_Texture,
-    Final_StorageTexture,
+    Composed_Texture,
+    Composed_StorageTexture,
 
     // History
     ComposedDiff_Texture,
@@ -275,8 +274,28 @@ enum class Descriptor : uint32_t
     TaaHistoryPrev_Texture,
     TaaHistoryPrev_StorageTexture,
 
+    // RR guides
+    RRGuide_DiffAlbedo_Texture,
+    RRGuide_DiffAlbedo_StorageTexture,
+    RRGuide_SpecAlbedo_Texture,
+    RRGuide_SpecAlbedo_StorageTexture,
+    RRGuide_SpecHitDistance_Texture,
+    RRGuide_SpecHitDistance_StorageTexture,
+    RRGuide_Normal_Roughness_Texture,
+    RRGuide_Normal_Roughness_StorageTexture,
+
+    // Output resolution
+    DlssOutput_Texture,
+    DlssOutput_StorageTexture,
+    PreFinal_Texture,
+    PreFinal_StorageTexture,
+
+    // Window resolution
+    Final_Texture,
+    Final_StorageTexture,
+
     // SH
-#if( NRD_MODE == SH )
+#if (NRD_MODE == SH)
     Unfiltered_DiffSh_Texture,
     Unfiltered_DiffSh_StorageTexture,
     Unfiltered_SpecSh_Texture,
@@ -288,34 +307,24 @@ enum class Descriptor : uint32_t
 #endif
 
     // Read-only
-    NisData1,
-    NisData2,
     MaterialTextures,
-
-    MAX_NUM,
-
-    // Aliases
-    DlssInput_Texture = Unfiltered_Diff_Texture,
-    DlssInput_StorageTexture = Unfiltered_Diff_StorageTexture
 };
 
-enum class DescriptorSet : uint32_t
-{
-    TraceAmbient1,
+enum class DescriptorSet : uint32_t {
+    Global0,
     TraceOpaque1,
     Composition1,
     TraceTransparent1,
-    Temporal1a,
-    Temporal1b,
-    Upsample1a,
-    Upsample1b,
-    UpsampleNis1a,
-    UpsampleNis1b,
-    PreDlss1,
-    AfterDlss1,
+    Taa1a,
+    Taa1b,
+    Final1,
+    DlssBefore1,
+    DlssAfter1,
     RayTracing2,
-    MorphTargetPose3,
-    MorphTargetUpdatePrimitives3,
+    SharcPing3,
+    SharcPong3,
+    MorphTargetPose4,
+    MorphTargetUpdatePrimitives4,
 
     MAX_NUM
 };
@@ -324,92 +333,81 @@ enum class DescriptorSet : uint32_t
 // thus we can use fields of "nrd::Denoiser" enum as unique identifiers
 #define NRD_ID(x) nrd::Identifier(nrd::Denoiser::x)
 
-struct NRIInterface
-    : public nri::CoreInterface
-    , public nri::SwapChainInterface
-    , public nri::RayTracingInterface
-    , public nri::HelperInterface
-{};
-
-struct Frame
-{
+struct QueuedFrame {
     nri::CommandAllocator* commandAllocator;
     nri::CommandBuffer* commandBuffer;
-    nri::Descriptor* globalConstantBufferDescriptor;
-    nri::DescriptorSet* globalConstantBufferDescriptorSet;
-    uint64_t globalConstantBufferOffset;
 };
 
-struct Settings
-{
-    double      motionStartTime                    = 0.0;
+struct Settings {
+    double motionStartTime = 0.0;
 
-    float       maxFps                             = 60.0f;
-    float       camFov                             = 90.0f;
-    float       sunAzimuth                         = -147.0f;
-    float       sunElevation                       = 45.0f;
-    float       sunAngularDiameter                 = 0.533f;
-    float       exposure                           = 80.0f;
-    float       roughnessOverride                  = 0.0f;
-    float       metalnessOverride                  = 0.0f;
-    float       emissionIntensity                  = 1.0f;
-    float       debug                              = 0.0f;
-    float       meterToUnitsMultiplier             = 1.0f;
-    float       emulateMotionSpeed                 = 1.0f;
-    float       animatedObjectScale                = 1.0f;
-    float       separator                          = 0.0f;
-    float       animationProgress                  = 0.0f;
-    float       animationSpeed                     = 0.0f;
-    float       hitDistScale                       = 3.0f;
-    float       disocclusionThreshold              = 1.0f;
-    float       resolutionScale                    = 1.0f;
-    float       sharpness                          = 0.15f;
+    float maxFps = 60.0f;
+    float camFov = 90.0f;
+    float sunAzimuth = -147.0f;
+    float sunElevation = 45.0f;
+    float sunAngularDiameter = 0.533f;
+    float exposure = 80.0f;
+    float roughnessOverride = 0.0f;
+    float metalnessOverride = 0.0f;
+    float emissionIntensity = 1.0f;
+    float debug = 0.0f;
+    float meterToUnitsMultiplier = 1.0f;
+    float emulateMotionSpeed = 1.0f;
+    float animatedObjectScale = 1.0f;
+    float separator = 0.0f;
+    float animationProgress = 0.0f;
+    float animationSpeed = 0.0f;
+    float hitDistScale = 3.0f;
+    float unused1 = 0.0f;
+    float resolutionScale = 1.0f;
+    float sharpness = 0.15f;
 
-    int32_t     maxAccumulatedFrameNum             = 31;
-    int32_t     maxFastAccumulatedFrameNum         = 7;
-    int32_t     onScreen                           = 0;
-    int32_t     forcedMaterial                     = 0;
-    int32_t     animatedObjectNum                  = 5;
-    int32_t     activeAnimation                    = 0;
-    int32_t     motionMode                         = 0;
-    int32_t     denoiser                           = DENOISER_REBLUR;
-    int32_t     rpp                                = 1;
-    int32_t     bounceNum                          = 1;
-    int32_t     tracingMode                        = RESOLUTION_FULL;
-    int32_t     mvType                             = MV_25D;
+    int32_t maxAccumulatedFrameNum = 31;
+    int32_t maxFastAccumulatedFrameNum = 7;
+    int32_t onScreen = 0;
+    int32_t forcedMaterial = 0;
+    int32_t animatedObjectNum = 5;
+    uint32_t activeAnimation = 0;
+    int32_t motionMode = 0;
+    int32_t denoiser = DENOISER_REBLUR;
+    int32_t rpp = 1;
+    int32_t bounceNum = 1;
+    int32_t tracingMode = RESOLUTION_HALF;
+    int32_t mvType = MV_25D;
 
-    bool        cameraJitter                       = true;
-    bool        limitFps                           = false;
-    bool        ambient                            = true;
-    bool        PSR                                = false;
-    bool        indirectDiffuse                    = true;
-    bool        indirectSpecular                   = true;
-    bool        normalMap                          = true;
-    bool        TAA                                = true;
-    bool        animatedObjects                    = false;
-    bool        animateScene                       = false;
-    bool        animateSun                         = false;
-    bool        nineBrothers                       = false;
-    bool        blink                              = false;
-    bool        pauseAnimation                     = true;
-    bool        emission                           = false;
-    bool        linearMotion                       = true;
-    bool        emissiveObjects                    = false;
-    bool        importanceSampling                 = true;
-    bool        specularLobeTrimming               = true;
-    bool        ortho                              = false;
-    bool        adaptiveAccumulation               = true;
-    bool        usePrevFrame                       = true;
-    bool        DLSS                               = false;
-    bool        NIS                                = true;
-    bool        adaptRadiusToResolution            = true;
-    bool        windowAlignment                    = true;
-    bool        highLightAhs                       = true;
-    bool        ahsDynamicMipSelection             = true;
+    bool cameraJitter = true;
+    bool limitFps = false;
+    bool SHARC = true;
+    bool PSR = false;
+    bool indirectDiffuse = true;
+    bool indirectSpecular = true;
+    bool normalMap = true;
+    bool TAA = true;
+    bool animatedObjects = false;
+    bool animateScene = false;
+    bool animateSun = false;
+    bool nineBrothers = false;
+    bool blink = false;
+    bool pauseAnimation = true;
+    bool emission = false;
+    bool linearMotion = true;
+    bool emissiveObjects = false;
+    bool importanceSampling = true;
+    bool specularLobeTrimming = true;
+    bool ortho = false;
+    bool adaptiveAccumulation = true;
+    bool usePrevFrame = true;
+    bool windowAlignment = true;
+    bool boost = false;
+    bool SR = false;
+    bool RR = false;
+#pragma region[ OmmSample specific ]
+    bool highLightAhs = true;
+    bool ahsDynamicMipSelection = true;
+#pragma endregion
 };
 
-struct DescriptorDesc
-{
+struct DescriptorDesc {
     const char* debugName;
     void* resource;
     nri::Format format;
@@ -418,15 +416,12 @@ struct DescriptorDesc
     bool isArray;
 };
 
-struct TextureState
-{
+struct TextureState {
     Texture texture;
-    nri::AccessBits nextAccess;
-    nri::TextureLayout nextLayout;
+    nri::AccessLayoutStage after;
 };
 
-struct AnimatedInstance
-{
+struct AnimatedInstance {
     float3 basePosition;
     float3 rotationAxis;
     float3 elipseAxis;
@@ -436,14 +431,13 @@ struct AnimatedInstance
     bool reverseRotation = true;
     bool reverseDirection = true;
 
-    float4x4 Animate(float elapsedSeconds, float scale, float3& position)
-    {
+    float4x4 Animate(float elapsedSeconds, float scale, float3& position) {
         float angle = progressedSec / durationSec;
         angle = Pi(angle * 2.0f - 1.0f);
 
         float3 localPosition;
-        localPosition.x = Cos(reverseDirection ? -angle : angle);
-        localPosition.y = Sin(reverseDirection ? -angle : angle);
+        localPosition.x = cos(reverseDirection ? -angle : angle);
+        localPosition.y = sin(reverseDirection ? -angle : angle);
         localPosition.z = localPosition.y;
 
         position = basePosition + localPosition * elipseAxis * scale;
@@ -452,63 +446,13 @@ struct AnimatedInstance
         transform.SetupByRotation(reverseRotation ? -angle : angle, rotationAxis);
         transform.AddScale(scale);
 
-        progressedSec = Mod(progressedSec + elapsedSeconds, durationSec);
+        progressedSec = fmod(progressedSec + elapsedSeconds, durationSec);
 
         return transform;
     }
 };
 
-class DynamicConstantBufferAllocator
-{
-public:
-    void Initialize(NRIInterface* NRI, nri::Device* device, nri::Buffer *constantBuffer, uint32_t size)
-    {
-        m_NRI = NRI;
-        m_Device = device;
-        m_ConstantBuffer = constantBuffer;
-        m_Size = size;
-
-        const nri::DeviceDesc& deviceDesc = m_NRI->GetDeviceDesc(*m_Device);
-        m_Alignment = deviceDesc.constantBufferOffsetAlignment;
-    }
-
-    template<typename T> constexpr T GetAlignedSize(const T& size)
-    {
-        return T(((size + m_Alignment - 1) / m_Alignment) * m_Alignment);
-    }
-
-    template<typename T> uint32_t Allocate(const T& constantBufferData)
-    {
-        uint32_t constantBufferViewSize = GetAlignedSize(static_cast<uint32_t>(sizeof(T)));
-
-        // assumes we have enough buffer to not overwrite the heap over multiple frames
-        if (m_DynamicConstantBufferOffset + constantBufferViewSize > m_Size)
-            m_DynamicConstantBufferOffset = 0;
-
-        T* pMappedData = static_cast<T*>(m_NRI->MapBuffer(*m_ConstantBuffer, m_DynamicConstantBufferOffset, constantBufferViewSize));
-        std::memcpy(pMappedData, &constantBufferData, sizeof(T));
-
-        uint32_t dynamicConstantBufferOffset = m_DynamicConstantBufferOffset;
-        m_DynamicConstantBufferOffset += constantBufferViewSize;
-
-        m_NRI->UnmapBuffer(*m_ConstantBuffer);
-
-        return dynamicConstantBufferOffset;
-    }
-
-    nri::Buffer* GetBuffer() const { return m_ConstantBuffer; }
-
-private:
-    nri::Device* m_Device = nullptr;
-    NRIInterface* m_NRI = nullptr;
-    nri::Buffer* m_ConstantBuffer = nullptr;
-    uint32_t m_Size = 0;
-    uint32_t m_DynamicConstantBufferOffset = 0;
-    uint32_t m_Alignment = 0;
-};
-
-struct AlphaTestedGeometry
-{
+struct AlphaTestedGeometry {
     ommhelper::OmmBakeGeometryDesc bakeDesc;
     ommhelper::MaskedGeometryBuildDesc buildDesc;
 
@@ -516,8 +460,8 @@ struct AlphaTestedGeometry
     nri::Buffer* uvs;
     nri::Buffer* indices;
 
-    nri::Texture* alphaTexture; //on gpu
-    utils::Texture* utilsTexture; //on cpu
+    nri::Texture* alphaTexture;   // on gpu
+    utils::Texture* utilsTexture; // on cpu
 
     std::vector<uint8_t> indexData;
     std::vector<uint8_t> uvData;
@@ -537,82 +481,241 @@ struct AlphaTestedGeometry
     const nri::Format indexFormat = nri::Format::R16_UINT;
 };
 
-struct OmmGpuBakerPrebuildMemoryStats
-{
+struct OmmGpuBakerPrebuildMemoryStats {
     size_t total;
     size_t outputMaxSizes[(uint32_t)ommhelper::OmmDataLayout::GpuOutputNum];
     size_t outputTotalSizes[(uint32_t)ommhelper::OmmDataLayout::GpuOutputNum];
     size_t maxTransientBufferSizes[OMM_MAX_TRANSIENT_POOL_BUFFERS];
 };
 
-struct OmmBatch
-{
+struct OmmBatch {
     size_t offset;
     size_t count;
 };
 
-class Sample : public SampleBase
-{
+class Sample : public SampleBase {
 public:
-    Sample() :
-        m_NRD(BUFFERED_FRAME_MAX_NUM, "NRD")
-    {
+    inline Sample() {
         m_SceneFile = "Bistro/BistroExterior.gltf";
-        m_OutputResolution = { 1920, 1080 };
+        m_OutputResolution = {1920, 1080};
     }
 
     ~Sample();
 
-    void InitCmdLine(cmdline::parser& cmdLine) override
-    {
-        cmdLine.add<int32_t>("dlssQuality", 'd', "DLSS quality: [-1: 3]", false, -1, cmdline::range(-1, 3));
-        cmdLine.add("ommDebugMode", 0, "enable omm-bake Nsight debug mode");
-        cmdLine.add("disableOmmBlasBuild", 0, "disable masked geometry building. Baking only");
-        cmdLine.add("enableOmmCache", 0, "enable omm init from cache");
-        cmdLine.add<uint32_t>("ommBuildPostponeFrameId", 0, "build OMM on desired frameId", false, 0);
+    inline float GetDenoisingRange() const {
+        return 4.0f * m_Scene.aabb.GetRadius();
     }
 
-    void ReadCmdLine(cmdline::parser& cmdLine) override
-    {
+    inline bool IsDlssEnabled() const {
+        return m_Settings.SR || m_Settings.RR;
+    }
+
+    inline nri::Texture*& Get(Texture index) {
+        return m_Textures[(uint32_t)index];
+    }
+
+    inline nri::TextureBarrierDesc& GetState(Texture index) {
+        return m_TextureStates[(uint32_t)index];
+    }
+
+    inline nri::Buffer*& Get(Buffer index) {
+        return m_Buffers[(uint32_t)index];
+    }
+
+    inline nri::Pipeline*& Get(Pipeline index) {
+        return m_Pipelines[(uint32_t)index];
+    }
+
+    inline nri::Descriptor*& Get(Descriptor index) {
+        return m_Descriptors[(uint32_t)index];
+    }
+
+    inline nri::DescriptorSet*& Get(DescriptorSet index) {
+        return m_DescriptorSets[(uint32_t)index];
+    }
+
+    inline nri::AccelerationStructure*& Get(AccelerationStructure index) {
+        return m_AccelerationStructures[(uint32_t)index];
+    }
+
+    inline nrd::Resource GetNrdResource(Texture index) {
+        nri::TextureBarrierDesc* textureState = &m_TextureStates[(uint32_t)index];
+
+        nrd::Resource resource = {};
+        resource.state = textureState->after;
+        resource.userArg = textureState;
+
+        if constexpr (NRD_USE_AUTO_WRAPPER) {
+            const nri::DeviceDesc& deviceDesc = NRI.GetDeviceDesc(*m_Device);
+            const nri::TextureDesc& textureDesc = NRI.GetTextureDesc(*textureState->texture);
+
+            if (deviceDesc.graphicsAPI == nri::GraphicsAPI::D3D12) {
+                resource.d3d12.resource = (ID3D12Resource*)NRI.GetTextureNativeObject(*textureState->texture);
+                resource.d3d12.format = nri::nriConvertNRIFormatToDXGI(textureDesc.format);
+            } else if (deviceDesc.graphicsAPI == nri::GraphicsAPI::VK) {
+                resource.vk.image = (VKNonDispatchableHandle)NRI.GetTextureNativeObject(*textureState->texture);
+                resource.vk.format = nri::nriConvertNRIFormatToVK(textureDesc.format);
+            }
+        } else
+            resource.nri.texture = textureState->texture;
+
+        return resource;
+    }
+
+    inline void Denoise(const nrd::Identifier* denoisers, uint32_t denoiserNum, nri::CommandBuffer& commandBuffer) {
+        // Fill resource snapshot
+        nrd::ResourceSnapshot resourceSnapshot = {};
+        {
+            resourceSnapshot.restoreInitialState = NRD_RESTORE_INITIAL_STATE;
+
+            // Common
+            resourceSnapshot.SetResource(nrd::ResourceType::IN_MV, GetNrdResource(Texture::Mv));
+            resourceSnapshot.SetResource(nrd::ResourceType::IN_NORMAL_ROUGHNESS, GetNrdResource(Texture::Normal_Roughness));
+            resourceSnapshot.SetResource(nrd::ResourceType::IN_VIEWZ, GetNrdResource(Texture::ViewZ));
+
+            // (Optional) Needed to allow IN_MV modification on the NRD side
+            resourceSnapshot.SetResource(nrd::ResourceType::IN_BASECOLOR_METALNESS, GetNrdResource(Texture::BaseColor_Metalness));
+
+            // (Optional) Validation
+            resourceSnapshot.SetResource(nrd::ResourceType::OUT_VALIDATION, GetNrdResource(Texture::Validation));
+
+            // Diffuse
+            resourceSnapshot.SetResource(nrd::ResourceType::IN_DIFF_RADIANCE_HITDIST, GetNrdResource(Texture::Unfiltered_Diff));
+            resourceSnapshot.SetResource(nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST, GetNrdResource(Texture::Diff));
+
+            // Diffuse occlusion
+#if (NRD_MODE == OCCLUSION)
+            resourceSnapshot.SetResource(nrd::ResourceType::IN_DIFF_HITDIST, GetNrdResource(Texture::Unfiltered_Diff));
+            resourceSnapshot.SetResource(nrd::ResourceType::OUT_DIFF_HITDIST, GetNrdResource(Texture::Diff));
+#endif
+
+            // Diffuse SH
+#if (NRD_MODE == SH)
+            resourceSnapshot.SetResource(nrd::ResourceType::IN_DIFF_SH0, GetNrdResource(Texture::Unfiltered_Diff));
+            resourceSnapshot.SetResource(nrd::ResourceType::IN_DIFF_SH1, GetNrdResource(Texture::Unfiltered_DiffSh));
+            resourceSnapshot.SetResource(nrd::ResourceType::OUT_DIFF_SH0, GetNrdResource(Texture::Diff));
+            resourceSnapshot.SetResource(nrd::ResourceType::OUT_DIFF_SH1, GetNrdResource(Texture::DiffSh));
+#endif
+
+            // Diffuse directional occlusion
+#if (NRD_MODE == DIRECTIONAL_OCCLUSION)
+            resourceSnapshot.SetResource(nrd::ResourceType::IN_DIFF_DIRECTION_HITDIST, GetNrdResource(Texture::Unfiltered_Diff));
+            resourceSnapshot.SetResource(nrd::ResourceType::OUT_DIFF_DIRECTION_HITDIST, GetNrdResource(Texture::Diff));
+#endif
+
+            // Specular
+            resourceSnapshot.SetResource(nrd::ResourceType::IN_SPEC_RADIANCE_HITDIST, GetNrdResource(Texture::Unfiltered_Spec));
+            resourceSnapshot.SetResource(nrd::ResourceType::OUT_SPEC_RADIANCE_HITDIST, GetNrdResource(Texture::Spec));
+
+            // Specular occlusion
+#if (NRD_MODE == OCCLUSION)
+            resourceSnapshot.SetResource(nrd::ResourceType::IN_SPEC_HITDIST, GetNrdResource(Texture::Unfiltered_Spec));
+            resourceSnapshot.SetResource(nrd::ResourceType::OUT_SPEC_HITDIST, GetNrdResource(Texture::Spec));
+#endif
+
+            // Specular SH
+#if (NRD_MODE == SH)
+            resourceSnapshot.SetResource(nrd::ResourceType::IN_SPEC_SH0, GetNrdResource(Texture::Unfiltered_Spec));
+            resourceSnapshot.SetResource(nrd::ResourceType::IN_SPEC_SH1, GetNrdResource(Texture::Unfiltered_SpecSh));
+            resourceSnapshot.SetResource(nrd::ResourceType::OUT_SPEC_SH0, GetNrdResource(Texture::Spec));
+            resourceSnapshot.SetResource(nrd::ResourceType::OUT_SPEC_SH1, GetNrdResource(Texture::SpecSh));
+#endif
+
+            // SIGMA
+            resourceSnapshot.SetResource(nrd::ResourceType::IN_PENUMBRA, GetNrdResource(Texture::Unfiltered_Penumbra));
+            resourceSnapshot.SetResource(nrd::ResourceType::IN_TRANSLUCENCY, GetNrdResource(Texture::Unfiltered_Translucency));
+            resourceSnapshot.SetResource(nrd::ResourceType::OUT_SHADOW_TRANSLUCENCY, GetNrdResource(Texture::Shadow));
+
+            // REFERENCE
+            resourceSnapshot.SetResource(nrd::ResourceType::IN_SIGNAL, GetNrdResource(Texture::Composed));
+            resourceSnapshot.SetResource(nrd::ResourceType::OUT_SIGNAL, GetNrdResource(Texture::Composed));
+        }
+
+        // Denoise
+        if constexpr (NRD_USE_AUTO_WRAPPER) {
+            const nri::DeviceDesc& deviceDesc = NRI.GetDeviceDesc(*m_Device);
+
+            if (deviceDesc.graphicsAPI == nri::GraphicsAPI::D3D12) {
+                nri::CommandBufferD3D12Desc commandBufferD3D12Desc = {};
+                commandBufferD3D12Desc.d3d12CommandList = (ID3D12GraphicsCommandList*)NRI.GetCommandBufferNativeObject(commandBuffer);
+
+                m_NRD.DenoiseD3D12(denoisers, denoiserNum, commandBufferD3D12Desc, resourceSnapshot);
+            } else if (deviceDesc.graphicsAPI == nri::GraphicsAPI::VK) {
+                nri::CommandBufferVKDesc commandBufferVKDesc = {};
+                commandBufferVKDesc.vkCommandBuffer = (VKHandle)NRI.GetCommandBufferNativeObject(commandBuffer);
+                commandBufferVKDesc.queueType = nri::QueueType::GRAPHICS;
+
+                m_NRD.DenoiseVK(denoisers, denoiserNum, commandBufferVKDesc, resourceSnapshot);
+            }
+        } else
+            m_NRD.Denoise(denoisers, denoiserNum, commandBuffer, resourceSnapshot);
+
+        // Retrieve state
+        if (!resourceSnapshot.restoreInitialState) {
+            for (size_t i = 0; i < resourceSnapshot.uniqueNum; i++) {
+                nri::TextureBarrierDesc* state = (nri::TextureBarrierDesc*)resourceSnapshot.unique[i].userArg;
+                state->before = state->after;
+                state->after = resourceSnapshot.unique[i].state;
+            }
+        }
+    }
+
+    inline void InitCmdLine(cmdline::parser& cmdLine) override {
+        cmdLine.add<int32_t>("dlssQuality", 'd', "DLSS quality: [-1: 4]", false, -1, cmdline::range(-1, 4));
+        cmdLine.add("debugNRD", 0, "enable NRD validation");
+    }
+
+    inline void ReadCmdLine(cmdline::parser& cmdLine) override {
         m_DlssQuality = cmdLine.get<int32_t>("dlssQuality");
-        m_OmmBakeDesc.enableDebugMode = cmdLine.exist("ommDebugMode");
-        m_OmmBakeDesc.buildFrameId = cmdLine.get<uint32_t>("ommBuildPostponeFrameId");
-        m_DisableOmmBlasBuild = cmdLine.exist("disableOmmBlasBuild");
-        m_OmmBakeDesc.enableCache = cmdLine.exist("enableOmmCache");
+        m_DebugNRD = cmdLine.exist("debugNRD");
+    }
+
+    inline nrd::RelaxSettings GetDefaultRelaxSettings() const {
+        nrd::RelaxSettings defaults = {};
+        // Helps to mitigate fireflies emphasized by DLSS
+
+#if (NRD_MODE < OCCLUSION)
+        // defaults.enableAntiFirefly = m_DlssQuality != -1 && IsDlssEnabled(); // TODO: currently doesn't help in this case, but makes the image darker
+#endif
+
+        return defaults;
+    }
+
+    inline nrd::ReblurSettings GetDefaultReblurSettings() const {
+        nrd::ReblurSettings defaults = {};
+
+#if (NRD_MODE < OCCLUSION)
+        // Helps to mitigate fireflies emphasized by DLSS
+        defaults.enableAntiFirefly = m_DlssQuality != -1 && IsDlssEnabled();
+#else
+        // Occlusion signal is cleaner by the definition
+        defaults.historyFixFrameNum = 2;
+
+        // TODO: experimental, but works well so far
+        defaults.minBlurRadius = 5.0f;
+        defaults.lobeAngleFraction = 0.5f;
+#endif
+
+        return defaults;
+    }
+
+    inline float3 GetSunDirection() const {
+        float3 sunDirection;
+        sunDirection.x = cos(radians(m_Settings.sunAzimuth)) * cos(radians(m_Settings.sunElevation));
+        sunDirection.y = sin(radians(m_Settings.sunAzimuth)) * cos(radians(m_Settings.sunElevation));
+        sunDirection.z = sin(radians(m_Settings.sunElevation));
+
+        return sunDirection;
     }
 
     bool Initialize(nri::GraphicsAPI graphicsAPI) override;
+    void LatencySleep(uint32_t frameIndex) override;
     void PrepareFrame(uint32_t frameIndex) override;
     void RenderFrame(uint32_t frameIndex) override;
-
-    inline nri::Texture*& Get(Texture index)
-    { return m_Textures[(uint32_t)index]; }
-
-    inline nri::TextureTransitionBarrierDesc& GetState(Texture index)
-    { return m_TextureStates[(uint32_t)index]; }
-
-    inline nri::Format GetFormat(Texture index)
-    { return m_TextureFormats[(uint32_t)index]; }
-
-    inline nri::Buffer*& Get(Buffer index)
-    { return m_Buffers[(uint32_t)index]; }
-
-    inline nri::Pipeline*& Get(Pipeline index)
-    { return m_Pipelines[(uint32_t)index]; }
-
-    inline nri::Descriptor*& Get(Descriptor index)
-    { return m_Descriptors[(uint32_t)index]; }
-
-    inline nri::DescriptorSet*& Get(DescriptorSet index)
-    { return m_DescriptorSets[(uint32_t)index]; }
-
-    inline nri::AccelerationStructure*& Get(AccelerationStructure index)
-    { return m_AccelerationStructures[(uint32_t)index]; }
 
     void LoadScene();
     void AddInnerGlassSurfaces();
     void GenerateAnimatedCubes();
-
     nri::Format CreateSwapChain();
     void CreateCommandBuffers();
     void CreatePipelineLayoutAndDescriptorPool();
@@ -621,86 +724,64 @@ public:
     void CreateSamplers();
     void CreateResources(nri::Format swapChainFormat);
     void CreateDescriptorSets();
-
-    void CreateTexture(std::vector<DescriptorDesc>& descriptorDescs, const char* debugName, nri::Format format, uint16_t width, uint16_t height, uint16_t mipNum, uint16_t arraySize, nri::TextureUsageBits usage, nri::AccessBits state);
-    void CreateBuffer(std::vector<DescriptorDesc>& descriptorDescs, const char* debugName, uint64_t elements, uint32_t stride, nri::BufferUsageBits usage, nri::Format format = nri::Format::UNKNOWN);
-
+    void CreateTexture(std::vector<DescriptorDesc>& descriptorDescs, const char* debugName, nri::Format format, nri::Dim_t width, nri::Dim_t height, nri::Mip_t mipNum, nri::Dim_t arraySize, nri::TextureUsageBits usage, nri::AccessBits state);
+    void CreateBuffer(std::vector<DescriptorDesc>& descriptorDescs, const char* debugName, nri::Format format, uint64_t elements, uint32_t stride, nri::BufferUsageBits usage);
     void UploadStaticData();
-    void UpdateConstantBuffer(uint32_t frameIndex, uint32_t maxAccumulatedFrameNum);
-    void RestoreBindings(nri::CommandBuffer& commandBuffer, const Frame& frame);
-    void BuildTopLevelAccelerationStructure(nri::CommandBuffer& commandBuffer, uint32_t bufferedFrameIndex);
-    uint32_t BuildOptimizedTransitions(const TextureState* states, uint32_t stateNum, std::array<nri::TextureTransitionBarrierDesc, MAX_TEXTURE_TRANSITIONS_NUM>& transitions);
-
-    void GenerateGeometry(utils::Scene& scene);
-    void GeneratePlane(utils::Scene& scene, float3 origin, float3 axisX, float3 axisY, float2 size, uint32_t subdivision, uint32_t vertexOffset, float uvScaling);
-    void PushVertex(utils::Scene& scene, float positionX, float positionY, float positionZ, float texCoordU, float texCoordV);
-    void ComputePrimitiveNormal(utils::Scene& scene, uint32_t vertexOffset, uint32_t indexOffset);
-
-    inline float3 GetSunDirection() const
-    {
-        float3 sunDirection;
-        sunDirection.x = Cos( DegToRad(m_Settings.sunAzimuth) ) * Cos( DegToRad(m_Settings.sunElevation) );
-        sunDirection.y = Sin( DegToRad(m_Settings.sunAzimuth) ) * Cos( DegToRad(m_Settings.sunElevation) );
-        sunDirection.z = Sin( DegToRad(m_Settings.sunElevation) );
-
-        return sunDirection;
-    }
-
-    inline float GetDenoisingRange() const
-    { return 4.0f * m_Scene.aabb.GetRadius(); }
-
-    inline nrd::ReblurSettings GetDefaultReblurSettings() const
-    {
-        nrd::ReblurSettings defaults = {};
-        defaults.antilagSettings.luminanceAntilagPower = 1.0f;
-
-        return defaults;
-    }
-
-    inline nrd::RelaxDiffuseSpecularSettings GetDefaultRelaxSettings() const
-    { return {}; }
+    void UpdateConstantBuffer(uint32_t frameIndex, float resetHistoryFactor);
+    void RestoreBindings(nri::CommandBuffer& commandBuffer, bool isEven, bool needRayTracing = true);
+    void GatherInstanceData();
+    uint16_t BuildOptimizedTransitions(const TextureState* states, uint32_t stateNum, std::array<nri::TextureBarrierDesc, MAX_TEXTURE_TRANSITIONS_NUM>& transitions);
 
 private:
-    NrdIntegration m_NRD;
-    DlssIntegration m_DLSS;
+    // NRD
+    nrd::Integration m_NRD = {};
+    nrd::RelaxSettings m_RelaxSettings = {};
+    nrd::ReblurSettings m_ReblurSettings = {};
+    nrd::SigmaSettings m_SigmaSettings = {};
+    nrd::ReferenceSettings m_ReferenceSettings = {};
+
+    // NRI
     NRIInterface NRI = {};
     utils::Scene m_Scene;
     nri::Device* m_Device = nullptr;
+    nri::Streamer* m_Streamer = nullptr;
+    nri::Upscaler* m_NIS = nullptr;
+    nri::Upscaler* m_DLSR = nullptr;
+    nri::Upscaler* m_DLRR = nullptr;
     nri::SwapChain* m_SwapChain = nullptr;
-    nri::CommandQueue* m_CommandQueue = nullptr;
-    nri::Fence* m_FrameFence;
+    nri::Queue* m_GraphicsQueue = nullptr;
+    nri::Fence* m_FrameFence = nullptr;
     nri::DescriptorPool* m_DescriptorPool = nullptr;
     nri::PipelineLayout* m_PipelineLayout = nullptr;
-    std::array<Frame, BUFFERED_FRAME_MAX_NUM> m_Frames = {};
-
-    DynamicConstantBufferAllocator m_DynamicConstantBufferAllocator = {};
-    nri::Descriptor* m_MorphTargetPoseConstantBufferView = nullptr;
-    nri::Descriptor* m_MorphTargetUpdatePrimitivesConstantBufferView = nullptr;
-
+    std::vector<QueuedFrame> m_QueuedFrames = {};
     std::vector<nri::Texture*> m_Textures;
-    std::vector<nri::TextureTransitionBarrierDesc> m_TextureStates;
-    std::vector<nri::Format> m_TextureFormats;
+    std::vector<nri::TextureBarrierDesc> m_TextureStates;
     std::vector<nri::Buffer*> m_Buffers;
-    std::vector<nri::Memory*> m_MemoryAllocations;
     std::vector<nri::Descriptor*> m_Descriptors;
     std::vector<nri::DescriptorSet*> m_DescriptorSets;
     std::vector<nri::Pipeline*> m_Pipelines;
     std::vector<nri::AccelerationStructure*> m_AccelerationStructures;
-    std::vector<BackBuffer> m_SwapChainBuffers;
+    std::vector<SwapChainTexture> m_SwapChainTextures;
+
+    // Data
+    std::vector<InstanceData> m_InstanceData;
+    std::vector<nri::TopLevelInstance> m_WorldTlasData;
+    std::vector<nri::TopLevelInstance> m_LightTlasData;
     std::vector<AnimatedInstance> m_AnimatedInstances;
     std::array<float, 256> m_FrameTimes = {};
-    nrd::RelaxDiffuseSpecularSettings m_RelaxSettings = {};
-    nrd::ReblurSettings m_ReblurSettings = {};
-    nrd::ReferenceSettings m_ReferenceSettings = {};
     Settings m_Settings = {};
     Settings m_SettingsPrev = {};
     Settings m_SettingsDefault = {};
     const std::vector<uint32_t>* m_checkMeTests = nullptr;
     const std::vector<uint32_t>* m_improveMeTests = nullptr;
+    float4 m_HairBaseColor = float4(0.510f, 0.395f, 0.218f, 1.0f);
     float3 m_PrevLocalPos = {};
+    float2 m_HairBetas = float2(0.25f, 0.6f);
     uint2 m_RenderResolution = {};
-    uint64_t m_ConstantBufferSize = 0;
     uint64_t m_MorphMeshScratchSize = 0;
+    nri::BufferOffset m_WorldTlasDataLocation = {};
+    nri::BufferOffset m_LightTlasDataLocation = {};
+    uint32_t m_GlobalConstantBufferOffset = 0;
     uint32_t m_OpaqueObjectsNum = 0;
     uint32_t m_TransparentObjectsNum = 0;
     uint32_t m_EmissiveObjectsNum = 0;
@@ -708,26 +789,31 @@ private:
     uint32_t m_LastSelectedTest = uint32_t(-1);
     uint32_t m_TestNum = uint32_t(-1);
     int32_t m_DlssQuality = int32_t(-1);
+    float m_SigmaTemporalStabilizationStrength = 1.0f;
     float m_UiWidth = 0.0f;
     float m_MinResolutionScale = 0.5f;
     float m_DofAperture = 0.0f;
     float m_DofFocalDistance = 1.0f;
-    bool m_HasTransparent = false;
+    float m_SdrScale = 1.0f;
     bool m_ShowUi = true;
     bool m_ForceHistoryReset = false;
     bool m_Resolve = true;
     bool m_DebugNRD = false;
-    bool m_ShowValidationOverlay = true;
+    bool m_ShowValidationOverlay = false;
     bool m_PositiveZ = true;
     bool m_ReversedZ = false;
+    bool m_IsSrgb = false;
+    bool m_GlassObjects = false;
+    bool m_IsReloadShadersSucceeded = true;
 
-    float4 m_HairBaseColorOverride = float4(0.227f, 0.130f, 0.035f, 1.0f);
-    float2 m_HairBetasOverride = float2(0.25f, 0.6f);
-
-private: //OMM:
+#pragma region[ OmmSample specific ]
+private: // OMM:
+    void GenerateGeometry(utils::Scene& scene);
+    void GeneratePlane(utils::Scene& scene, float3 origin, float3 axisX, float3 axisY, float2 size, uint32_t subdivision, uint32_t vertexOffset, float uvScaling);
+    void PushVertex(utils::Scene& scene, float positionX, float positionY, float positionZ, float texCoordU, float texCoordV);
+    void ComputePrimitiveNormal(utils::Scene& scene, uint32_t vertexOffset, uint32_t indexOffset);
 
     struct OmmNriContext;
-
     void InitAlphaTestedGeometry();
 
     void RebuildOmmGeometry();
@@ -745,8 +831,14 @@ private: //OMM:
     void CreateAndBindGpuBakerArrayDataBuffer(const OmmGpuBakerPrebuildMemoryStats& memoryStats);
     void CreateAndBindGpuBakerReadbackBuffer(const OmmGpuBakerPrebuildMemoryStats& memoryStats);
 
-    inline uint64_t GetInstanceHash(uint32_t meshId, uint32_t materialId) { return uint64_t(meshId) << 32 | uint64_t(materialId); };
-    inline std::string GetOmmCacheFilename() { return m_OmmCacheFolderName + std::string("/") + m_SceneName; };
+    inline uint64_t GetInstanceHash(uint32_t meshId, uint32_t materialId) {
+        return uint64_t(meshId) << 32 | uint64_t(materialId);
+    };
+
+    inline std::string GetOmmCacheFilename() {
+        return m_OmmCacheFolderName + std::string("/") + m_SceneName;
+    };
+
     void InitializeOmmGeometryFromCache(const OmmBatch& batch, std::vector<ommhelper::OmmBakeGeometryDesc*>& outBakeQueue);
     void SaveMaskCache(const OmmBatch& batch);
 
@@ -758,25 +850,25 @@ private: //OMM:
     void AppendOmmImguiSettings();
 
 private:
-    struct OmmNriContext
-    {
-        void Init(const NRIInterface& NRI, nri::Device* device, nri::CommandQueueType type);
+    struct OmmNriContext {
+        void Init(const NRIInterface& NRI, nri::Device* device, nri::QueueType type);
         void Destroy(const NRIInterface& NRI);
 
         nri::CommandAllocator* commandAllocator;
         nri::CommandBuffer* commandBuffer;
-        nri::CommandQueue* commandQueue;
+        nri::Queue* commandQueue;
         nri::Fence* fence;
         uint64_t fenceValue = 0;
     };
+
     ommhelper::OpacityMicroMapsHelper m_OmmHelper = {};
 
-    //preprocessed alpha geometry from the scene:
+    // preprocessed alpha geometry from the scene:
     std::vector<AlphaTestedGeometry> m_OmmAlphaGeometry;
     std::vector<nri::Memory*> m_OmmAlphaGeometryMemories;
     std::vector<nri::Buffer*> m_OmmAlphaGeometryBuffers;
 
-    //temporal resources for baking
+    // temporal resources for baking
     std::vector<uint8_t> m_OmmRawAlphaChannelForCpuBaker;
 
     nri::Buffer* m_OmmGpuOutputBuffers[(uint32_t)ommhelper::OmmDataLayout::GpuOutputNum] = {};
@@ -787,16 +879,16 @@ private:
     std::vector<nri::Memory*> m_OmmBakerAllocations;
     std::vector<nri::Memory*> m_OmmTmpAllocations;
 
-    //misc
+    // misc
     OmmNriContext m_OmmGraphicsContext;
     OmmNriContext m_OmmComputeContext;
 
-    struct OmmBlas
-    {
+    struct OmmBlas {
         nri::AccelerationStructure* blas;
         //[!] VK Warning! VkMicromapExt wrapping is not supported yet. Use OmmHelper::DestroyMaskedGeometry instead of nri on release.
         nri::Buffer* ommArray;
     };
+
     std::map<uint64_t, OmmBlas> m_InstanceMaskToMaskedBlasData;
     std::vector<OmmBlas> m_MaskedBlasses;
     ommhelper::OmmBakeDesc m_OmmBakeDesc = {};
@@ -812,228 +904,384 @@ private:
 
 private:
     Profiler m_Profiler;
+#pragma endregion
 };
 
-Sample::~Sample()
-{
-    if (!m_Device)
-        return;
 
-    NRI.WaitForIdle(*m_CommandQueue);
+Sample::~Sample() {
+    if (NRI.HasHelper())
+        NRI.WaitForIdle(*m_GraphicsQueue);
 
-    m_DLSS.Shutdown();
+    if (NRI.HasUpscaler()) {
+        NRI.DestroyUpscaler(*m_NIS);
+        NRI.DestroyUpscaler(*m_DLSR);
+        NRI.DestroyUpscaler(*m_DLRR);
+    }
+
+    if (NRI.HasCore()) {
+        for (QueuedFrame& queuedFrame : m_QueuedFrames) {
+            NRI.DestroyCommandBuffer(*queuedFrame.commandBuffer);
+            NRI.DestroyCommandAllocator(*queuedFrame.commandAllocator);
+        }
+
+        for (SwapChainTexture& swapChainTexture : m_SwapChainTextures) {
+            NRI.DestroyFence(*swapChainTexture.releaseSemaphore);
+            NRI.DestroyFence(*swapChainTexture.acquireSemaphore);
+            NRI.DestroyDescriptor(*swapChainTexture.colorAttachment);
+        }
+
+        for (uint32_t i = 0; i < m_Textures.size(); i++)
+            NRI.DestroyTexture(*m_Textures[i]);
+
+        for (uint32_t i = 0; i < m_Buffers.size(); i++)
+            NRI.DestroyBuffer(*m_Buffers[i]);
+
+        for (uint32_t i = 0; i < m_Descriptors.size(); i++)
+            NRI.DestroyDescriptor(*m_Descriptors[i]);
+
+        for (uint32_t i = 0; i < m_Pipelines.size(); i++)
+            NRI.DestroyPipeline(*m_Pipelines[i]);
+
+        for (uint32_t i = 0; i < m_AccelerationStructures.size(); i++)
+            NRI.DestroyAccelerationStructure(*m_AccelerationStructures[i]);
+
+        NRI.DestroyPipelineLayout(*m_PipelineLayout);
+        NRI.DestroyDescriptorPool(*m_DescriptorPool);
+        NRI.DestroyFence(*m_FrameFence);
+    }
+
+    if (NRI.HasSwapChain())
+        NRI.DestroySwapChain(*m_SwapChain);
+
+    if (NRI.HasStreamer())
+        NRI.DestroyStreamer(*m_Streamer);
 
     m_NRD.Destroy();
 
+    #pragma region[ OmmSample specific ]
     m_Profiler.Destroy();
     ReleaseMaskedGeometry();
     ReleaseBakingResources();
     m_OmmHelper.Destroy();
     m_OmmGraphicsContext.Destroy(NRI);
     m_OmmComputeContext.Destroy(NRI);
+#pragma endregion
 
-    for (auto& buffer : m_OmmAlphaGeometryBuffers)
-        NRI.DestroyBuffer(*buffer);
-    for (auto& memory : m_OmmAlphaGeometryMemories)
-        NRI.FreeMemory(*memory);
-
-    for (Frame& frame : m_Frames)
-    {
-        NRI.DestroyCommandBuffer(*frame.commandBuffer);
-        NRI.DestroyCommandAllocator(*frame.commandAllocator);
-        NRI.DestroyDescriptor(*frame.globalConstantBufferDescriptor);
-    }
-
-    NRI.DestroyDescriptor(*m_MorphTargetPoseConstantBufferView);
-
-    for (BackBuffer& backBuffer : m_SwapChainBuffers)
-    {
-        NRI.DestroyDescriptor(*backBuffer.colorAttachment);
-        NRI.DestroyFrameBuffer(*backBuffer.frameBufferUI);
-    }
-
-    for (uint32_t i = 0; i < m_Textures.size(); i++)
-        NRI.DestroyTexture(*m_Textures[i]);
-
-    for (uint32_t i = 0; i < m_Buffers.size(); i++)
-        NRI.DestroyBuffer(*m_Buffers[i]);
-
-    for (uint32_t i = 0; i < m_Descriptors.size(); i++)
-        NRI.DestroyDescriptor(*m_Descriptors[i]);
-
-    for (uint32_t i = 0; i < m_Pipelines.size(); i++)
-        NRI.DestroyPipeline(*m_Pipelines[i]);
-
-    for (uint32_t i = 0; i < m_AccelerationStructures.size(); i++)
-    {
-        if (m_AccelerationStructures[i])
-            NRI.DestroyAccelerationStructure(*m_AccelerationStructures[i]);
-    }
-
-    NRI.DestroyPipelineLayout(*m_PipelineLayout);
-    NRI.DestroyDescriptorPool(*m_DescriptorPool);
-    NRI.DestroyFence(*m_FrameFence);
-    NRI.DestroySwapChain(*m_SwapChain);
-
-    for (size_t i = 0; i < m_MemoryAllocations.size(); i++)
-    {
-        if (m_MemoryAllocations[i])
-        NRI.FreeMemory(*m_MemoryAllocations[i]);
-    }
-
-    DestroyUserInterface();
+    DestroyImgui();
 
     nri::nriDestroyDevice(*m_Device);
 }
 
-bool Sample::Initialize(nri::GraphicsAPI graphicsAPI)
-{
-    Rand::Seed(106937, &m_FastRandState);
+bool Sample::Initialize(nri::GraphicsAPI graphicsAPI) {
+    Rng::Hash::Initialize(m_RngState, 106937, 69);
 
     nri::AdapterDesc bestAdapterDesc = {};
     uint32_t adapterDescsNum = 1;
     NRI_ABORT_ON_FAILURE(nri::nriEnumerateAdapters(&bestAdapterDesc, adapterDescsNum));
 
+    const nri::QueueFamilyDesc queueFamilies[] = {
+        {nullptr, 1, nri::QueueType::GRAPHICS},
+        {nullptr, 1, nri::QueueType::COMPUTE},
+    };
+
     nri::DeviceCreationDesc deviceCreationDesc = {};
     deviceCreationDesc.graphicsAPI = graphicsAPI;
-    deviceCreationDesc.enableAPIValidation = m_DebugAPI;
+    deviceCreationDesc.enableGraphicsAPIValidation = m_DebugAPI;
     deviceCreationDesc.enableNRIValidation = m_DebugNRI;
-    deviceCreationDesc.spirvBindingOffsets = SPIRV_BINDING_OFFSETS;
+    deviceCreationDesc.vkBindingOffsets = VK_BINDING_OFFSETS;
     deviceCreationDesc.adapterDesc = &bestAdapterDesc;
-    if (bestAdapterDesc.vendor == nri::Vendor::NVIDIA)
-        DlssIntegration::SetupDeviceExtensions(deviceCreationDesc);
+    deviceCreationDesc.queueFamilies = queueFamilies;
+    deviceCreationDesc.queueFamilyNum = uint32_t(std::size(queueFamilies));
+    NRI_ABORT_ON_FAILURE(nri::nriCreateDevice(deviceCreationDesc, m_Device));
 
-    NRI_ABORT_ON_FAILURE( nri::nriCreateDevice(deviceCreationDesc, m_Device) );
+    NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::CoreInterface), (nri::CoreInterface*)&NRI));
+    NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::HelperInterface), (nri::HelperInterface*)&NRI));
+    NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::RayTracingInterface), (nri::RayTracingInterface*)&NRI));
+    NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::ResourceAllocatorInterface), (nri::ResourceAllocatorInterface*)&NRI));
+    NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::StreamerInterface), (nri::StreamerInterface*)&NRI));
+    NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::SwapChainInterface), (nri::SwapChainInterface*)&NRI));
+    NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::UpscalerInterface), (nri::UpscalerInterface*)&NRI));
 
-    NRI_ABORT_ON_FAILURE( nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::CoreInterface), (nri::CoreInterface*)&NRI) );
-    NRI_ABORT_ON_FAILURE( nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::SwapChainInterface), (nri::SwapChainInterface*)&NRI) );
-    NRI_ABORT_ON_FAILURE( nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::RayTracingInterface), (nri::RayTracingInterface*)&NRI) );
-    NRI_ABORT_ON_FAILURE( nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::HelperInterface), (nri::HelperInterface*)&NRI) );
+    NRI_ABORT_ON_FAILURE(NRI.GetQueue(*m_Device, nri::QueueType::GRAPHICS, 0, m_GraphicsQueue));
+    NRI_ABORT_ON_FAILURE(NRI.CreateFence(*m_Device, 0, m_FrameFence));
 
-    NRI_ABORT_ON_FAILURE( NRI.GetCommandQueue(*m_Device, nri::CommandQueueType::GRAPHICS, m_CommandQueue));
-    NRI_ABORT_ON_FAILURE( NRI.CreateFence(*m_Device, 0, m_FrameFence) );
-
-    const nri::DeviceDesc& deviceDesc = NRI.GetDeviceDesc(*m_Device);
-
-#ifdef DXR_OMM
-    if (deviceDesc.graphicsAPI == nri::GraphicsAPI::D3D12)
-    {
-        ID3D12Device* d3d12Device = (ID3D12Device*)NRI.GetDeviceNativeObject(*m_Device);
-        if (d3d12Device)
-        {
-            D3D12_FEATURE_DATA_D3D12_OPTIONS5 options5 = {};
-            HRESULT hr = d3d12Device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &options5, sizeof(options5));
-
-            if (SUCCEEDED(hr) && options5.RaytracingTier < D3D12_RAYTRACING_TIER_1_2)
-            {
-                const char* errorMessage =
-                    "DXR_OMM is enabled but your GPU does not support D3D12_RAYTRACING_TIER_1_2.\n\n"
-                    "D3D12_RAYTRACING_TIER_1_2 is required for Opacity Micromaps support.\n\n"
-                    "Please update GPU driver or disable DXR_OMM in CMakeLists.txt.\n\n"
-                    "Preview drivers can be downloaded from: https://developer.nvidia.com/downloads/shadermodel6-9-preview-driver";
-
-                MessageBoxA(nullptr, errorMessage, "DXR 1.2 Support Required", MB_OK | MB_ICONERROR);
-                NRI_ABORT_ON_FALSE(false);
-            }
-        }
+    { // Create streamer
+        nri::StreamerDesc streamerDesc = {};
+        streamerDesc.constantBufferMemoryLocation = nri::MemoryLocation::HOST_UPLOAD;
+        streamerDesc.constantBufferSize = DYNAMIC_CONSTANT_BUFFER_SIZE;
+        streamerDesc.dynamicBufferMemoryLocation = nri::MemoryLocation::HOST_UPLOAD;
+        streamerDesc.dynamicBufferUsageBits = nri::BufferUsageBits::VERTEX_BUFFER | nri::BufferUsageBits::INDEX_BUFFER | nri::BufferUsageBits::SHADER_RESOURCE | nri::BufferUsageBits::ACCELERATION_STRUCTURE_BUILD_INPUT;
+        streamerDesc.queuedFrameNum = GetQueuedFrameNum();
+        NRI_ABORT_ON_FAILURE(NRI.CreateStreamer(*m_Device, streamerDesc, m_Streamer));
     }
-#endif
 
-    m_ConstantBufferSize = helper::Align(sizeof(GlobalConstants), deviceDesc.constantBufferOffsetAlignment);
+    { // Create upscaler: NIS
+        nri::UpscalerDesc upscalerDesc = {};
+        upscalerDesc.upscaleResolution = {(nri::Dim_t)GetOutputResolution().x, (nri::Dim_t)GetOutputResolution().y};
+        upscalerDesc.type = nri::UpscalerType::NIS;
+        NRI_ABORT_ON_FAILURE(NRI.CreateUpscaler(*m_Device, upscalerDesc, m_NIS));
+    }
+
+    // Create upscalers: DLSR and DLRR
     m_RenderResolution = GetOutputResolution();
 
-    if (m_DlssQuality != -1 && m_DLSS.InitializeLibrary(*m_Device, ""))
-    {
-        DlssSettings dlssSettings = {};
-        DlssInitDesc dlssInitDesc = {};
-        dlssInitDesc.outputResolution = { GetOutputResolution().x, GetOutputResolution().y };
+    if (m_DlssQuality != -1) {
+        nri::UpscalerBits upscalerFlags = nri::UpscalerBits::DEPTH_INFINITE;
+        upscalerFlags |= NRD_MODE < OCCLUSION ? nri::UpscalerBits::HDR : nri::UpscalerBits::NONE;
+        upscalerFlags |= m_ReversedZ ? nri::UpscalerBits::DEPTH_INVERTED : nri::UpscalerBits::NONE;
 
-        if (m_DLSS.GetOptimalSettings(dlssInitDesc.outputResolution, (DlssQuality)m_DlssQuality, dlssSettings))
-        {
-            dlssInitDesc.quality = (DlssQuality)m_DlssQuality;
-            dlssInitDesc.isContentHDR = true;
+        nri::UpscalerMode mode = nri::UpscalerMode::NATIVE;
+        if (m_DlssQuality == 0)
+            mode = nri::UpscalerMode::ULTRA_PERFORMANCE;
+        else if (m_DlssQuality == 1)
+            mode = nri::UpscalerMode::PERFORMANCE;
+        else if (m_DlssQuality == 2)
+            mode = nri::UpscalerMode::BALANCED;
+        else if (m_DlssQuality == 3)
+            mode = nri::UpscalerMode::QUALITY;
 
-            m_DLSS.Initialize(m_CommandQueue, dlssInitDesc);
+        if (NRI.IsUpscalerSupported(*m_Device, nri::UpscalerType::DLSR)) {
+            nri::VideoMemoryInfo videoMemoryInfo1 = {};
+            NRI.QueryVideoMemoryInfo(*m_Device, nri::MemoryLocation::DEVICE, videoMemoryInfo1);
 
-            float sx = float(dlssSettings.minRenderResolution.Width) / float(dlssSettings.renderResolution.Width);
-            float sy = float(dlssSettings.minRenderResolution.Height) / float(dlssSettings.renderResolution.Height);
-            float minResolutionScale = sy > sx ? sy : sx;
+            nri::UpscalerDesc upscalerDesc = {};
+            upscalerDesc.upscaleResolution = {(nri::Dim_t)GetOutputResolution().x, (nri::Dim_t)GetOutputResolution().y};
+            upscalerDesc.type = upscalerType;
+            upscalerDesc.mode = mode;
+            upscalerDesc.flags = upscalerFlags;
+            upscalerDesc.preset = USE_DLSS_TNN ? 10 : 0;
+            NRI_ABORT_ON_FAILURE(NRI.CreateUpscaler(*m_Device, upscalerDesc, m_DLSR));
 
-            m_RenderResolution = { dlssSettings.renderResolution.Width, dlssSettings.renderResolution.Height };
-            m_MinResolutionScale = minResolutionScale;
+            nri::UpscalerProps upscalerProps = {};
+            NRI.GetUpscalerProps(*m_DLSR, upscalerProps);
+
+            float sx = float(upscalerProps.renderResolutionMin.w) / float(upscalerProps.renderResolution.w);
+            float sy = float(upscalerProps.renderResolutionMin.h) / float(upscalerProps.renderResolution.h);
+
+            m_RenderResolution = {upscalerProps.renderResolution.w, upscalerProps.renderResolution.h};
+            m_MinResolutionScale = sy > sx ? sy : sx;
+
+            nri::VideoMemoryInfo videoMemoryInfo2 = {};
+            NRI.QueryVideoMemoryInfo(*m_Device, nri::MemoryLocation::DEVICE, videoMemoryInfo2);
 
             printf("Render resolution (%u, %u)\n", m_RenderResolution.x, m_RenderResolution.y);
+            printf("DLSS-SR: allocated %.2f Mb\n", (videoMemoryInfo2.usageSize - videoMemoryInfo1.usageSize) / (1024.0f * 1024.0f));
 
-            m_Settings.sharpness = dlssSettings.sharpness;
-            m_Settings.DLSS = true;
+            m_Settings.SR = true;
         }
-        else
-        {
-            m_DLSS.Shutdown();
 
-            printf("Unsupported DLSS mode!\n");
+        if (NRI.IsUpscalerSupported(*m_Device, nri::UpscalerType::DLRR)) {
+            nri::VideoMemoryInfo videoMemoryInfo1 = {};
+            NRI.QueryVideoMemoryInfo(*m_Device, nri::MemoryLocation::DEVICE, videoMemoryInfo1);
+
+            nri::UpscalerDesc upscalerDesc = {};
+            upscalerDesc.upscaleResolution = {(nri::Dim_t)GetOutputResolution().x, (nri::Dim_t)GetOutputResolution().y};
+            upscalerDesc.type = nri::UpscalerType::DLRR;
+            upscalerDesc.mode = mode;
+            upscalerDesc.flags = upscalerFlags;
+            NRI_ABORT_ON_FAILURE(NRI.CreateUpscaler(*m_Device, upscalerDesc, m_DLRR));
+
+            nri::VideoMemoryInfo videoMemoryInfo2 = {};
+            NRI.QueryVideoMemoryInfo(*m_Device, nri::MemoryLocation::DEVICE, videoMemoryInfo2);
+
+            printf("DLSS-RR: allocated %.2f Mb\n", (videoMemoryInfo2.usageSize - videoMemoryInfo1.usageSize) / (1024.0f * 1024.0f));
+
+            m_Settings.RR = true;
         }
+    }
+
+    // Initialize NRD: REBLUR, RELAX and SIGMA in one instance
+    {
+        const nrd::DenoiserDesc denoisersDescs[] = {
+        // REBLUR
+#if (NRD_MODE == OCCLUSION)
+#    if (NRD_COMBINED == 1)
+            {NRD_ID(REBLUR_DIFFUSE_SPECULAR_OCCLUSION), nrd::Denoiser::REBLUR_DIFFUSE_SPECULAR_OCCLUSION},
+#    else
+            {NRD_ID(REBLUR_DIFFUSE_OCCLUSION), nrd::Denoiser::REBLUR_DIFFUSE_OCCLUSION},
+            {NRD_ID(REBLUR_SPECULAR_OCCLUSION), nrd::Denoiser::REBLUR_SPECULAR_OCCLUSION},
+#    endif
+#elif (NRD_MODE == SH)
+#    if (NRD_COMBINED == 1)
+            {NRD_ID(REBLUR_DIFFUSE_SPECULAR_SH), nrd::Denoiser::REBLUR_DIFFUSE_SPECULAR_SH},
+#    else
+            {NRD_ID(REBLUR_DIFFUSE_SH), nrd::Denoiser::REBLUR_DIFFUSE_SH},
+            {NRD_ID(REBLUR_SPECULAR_SH), nrd::Denoiser::REBLUR_SPECULAR_SH},
+#    endif
+#elif (NRD_MODE == DIRECTIONAL_OCCLUSION)
+            {NRD_ID(REBLUR_DIFFUSE_DIRECTIONAL_OCCLUSION), nrd::Denoiser::REBLUR_DIFFUSE_DIRECTIONAL_OCCLUSION},
+#else
+#    if (NRD_COMBINED == 1)
+            {NRD_ID(REBLUR_DIFFUSE_SPECULAR), nrd::Denoiser::REBLUR_DIFFUSE_SPECULAR},
+#    else
+            {NRD_ID(REBLUR_DIFFUSE), nrd::Denoiser::REBLUR_DIFFUSE},
+            {NRD_ID(REBLUR_SPECULAR), nrd::Denoiser::REBLUR_SPECULAR},
+#    endif
+#endif
+
+        // RELAX
+#if (NRD_MODE == SH)
+#    if (NRD_COMBINED == 1)
+            {NRD_ID(RELAX_DIFFUSE_SPECULAR_SH), nrd::Denoiser::RELAX_DIFFUSE_SPECULAR_SH},
+#    else
+            {NRD_ID(RELAX_DIFFUSE_SH), nrd::Denoiser::RELAX_DIFFUSE_SH},
+            {NRD_ID(RELAX_SPECULAR_SH), nrd::Denoiser::RELAX_SPECULAR_SH},
+#    endif
+#else
+#    if (NRD_COMBINED == 1)
+            {NRD_ID(RELAX_DIFFUSE_SPECULAR), nrd::Denoiser::RELAX_DIFFUSE_SPECULAR},
+#    else
+            {NRD_ID(RELAX_DIFFUSE), nrd::Denoiser::RELAX_DIFFUSE},
+            {NRD_ID(RELAX_SPECULAR), nrd::Denoiser::RELAX_SPECULAR},
+#    endif
+#endif
+
+        // SIGMA
+#if (NRD_MODE < OCCLUSION)
+            {NRD_ID(SIGMA_SHADOW), SIGMA_VARIANT},
+#endif
+
+            // REFERENCE
+            {NRD_ID(REFERENCE), nrd::Denoiser::REFERENCE},
+        };
+
+        nrd::InstanceCreationDesc instanceCreationDesc = {};
+        instanceCreationDesc.denoisers = denoisersDescs;
+        instanceCreationDesc.denoisersNum = helper::GetCountOf(denoisersDescs);
+
+        nrd::IntegrationCreationDesc desc = {};
+        strcpy(desc.name, "NRD");
+        desc.queuedFrameNum = GetQueuedFrameNum();
+        desc.enableWholeLifetimeDescriptorCaching = NRD_ENABLE_WHOLE_LIFETIME_DESCRIPTOR_CACHING;
+        desc.promoteFloat16to32 = NRD_PROMOTE_FLOAT16_TO_32;
+        desc.demoteFloat32to16 = NRD_DEMOTE_FLOAT32_TO_16;
+        desc.resourceWidth = (uint16_t)m_RenderResolution.x;
+        desc.resourceHeight = (uint16_t)m_RenderResolution.y;
+        desc.autoWaitForIdle = false;
+
+        nri::VideoMemoryInfo videoMemoryInfo1 = {};
+        NRI.QueryVideoMemoryInfo(*m_Device, nri::MemoryLocation::DEVICE, videoMemoryInfo1);
+
+        if constexpr (NRD_USE_AUTO_WRAPPER) {
+            const nri::DeviceDesc& deviceDesc = NRI.GetDeviceDesc(*m_Device);
+
+            if (deviceDesc.graphicsAPI == nri::GraphicsAPI::D3D12) {
+                ID3D12CommandQueue* queue = (ID3D12CommandQueue*)NRI.GetQueueNativeObject(*m_GraphicsQueue);
+
+                nri::QueueFamilyD3D12Desc queueFamily = {};
+                queueFamily.d3d12Queues = &queue;
+                queueFamily.queueType = nri::QueueType::GRAPHICS;
+                queueFamily.queueNum = 1;
+
+                nri::DeviceCreationD3D12Desc deviceCreationD3D12Desc = {};
+                deviceCreationD3D12Desc.d3d12Device = (ID3D12Device*)NRI.GetDeviceNativeObject(*m_Device);
+                deviceCreationD3D12Desc.queueFamilies = &queueFamily;
+                deviceCreationD3D12Desc.queueFamilyNum = 1;
+                deviceCreationD3D12Desc.enableNRIValidation = m_DebugNRI;
+
+                if (m_NRD.RecreateD3D12(desc, instanceCreationDesc, deviceCreationD3D12Desc) != nrd::Result::SUCCESS)
+                    return false;
+            } else {
+                nri::WrapperVKInterface iWrapperVK = {};
+                NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::WrapperVKInterface), &iWrapperVK));
+
+                nri::QueueFamilyVKDesc queueFamily = {};
+                queueFamily.familyIndex = iWrapperVK.GetQueueFamilyIndexVK(*m_GraphicsQueue);
+                queueFamily.queueType = nri::QueueType::GRAPHICS;
+                queueFamily.queueNum = 1;
+
+                nri::DeviceCreationVKDesc deviceCreationVKDesc = {};
+                deviceCreationVKDesc.vkInstance = (VKHandle)iWrapperVK.GetInstanceVK(*m_Device);
+                deviceCreationVKDesc.vkPhysicalDevice = (VKHandle)iWrapperVK.GetPhysicalDeviceVK(*m_Device);
+                deviceCreationVKDesc.vkDevice = (VKHandle)NRI.GetDeviceNativeObject(*m_Device);
+                deviceCreationVKDesc.minorVersion = 3;
+                deviceCreationVKDesc.queueFamilies = &queueFamily;
+                deviceCreationVKDesc.queueFamilyNum = 1;
+                deviceCreationVKDesc.enableNRIValidation = m_DebugNRI;
+
+                if (m_NRD.RecreateVK(desc, instanceCreationDesc, deviceCreationVKDesc) != nrd::Result::SUCCESS)
+                    return false;
+            }
+        } else {
+            if (m_NRD.Recreate(desc, instanceCreationDesc, m_Device) != nrd::Result::SUCCESS)
+                return false;
+        }
+
+        nri::VideoMemoryInfo videoMemoryInfo2 = {};
+        NRI.QueryVideoMemoryInfo(*m_Device, nri::MemoryLocation::DEVICE, videoMemoryInfo2);
+
+        printf("NRD: allocated %.2f Mb for REBLUR, RELAX, SIGMA and REFERENCE denoisers\n", (videoMemoryInfo2.usageSize - videoMemoryInfo1.usageSize) / (1024.0f * 1024.0f));
     }
 
 #if 0
-    // README "Memory requirements" table generator
-    printf("| %10s | %36s | %16s | %16s | %16s |\n", "Resolution", "Denoiser", "Working set (Mb)", "Persistent (Mb)", "Aliasable (Mb)");
-    printf("|------------|--------------------------------------|------------------|------------------|------------------|\n");
+        // README "Memory requirements" table generator
+        printf("| %10s | %36s | %16s | %16s | %16s |\n", "Resolution", "Denoiser", "Working set (Mb)", "Persistent (Mb)", "Aliasable (Mb)");
+        printf("|------------|--------------------------------------|------------------|------------------|------------------|\n");
 
-    for (uint32_t j = 0; j < 3; j++)
-    {
-        const char* resolution = "1080p";
-        uint16_t w = 1920;
-        uint16_t h = 1080;
+        for (uint32_t j = 0; j < 3; j++)
+        {
+            const char* resolution = "1080p";
+            uint16_t w = 1920;
+            uint16_t h = 1080;
 
-        if (j == 1)
-        {
-            resolution = "1440p";
-            w = 2560;
-            h = 1440;
-        }
-        else if (j == 2)
-        {
-            resolution = "2160p";
-            w = 3840;
-            h = 2160;
-        }
+            if (j == 1)
+            {
+                resolution = "1440p";
+                w = 2560;
+                h = 1440;
+            }
+            else if (j == 2)
+            {
+                resolution = "2160p";
+                w = 3840;
+                h = 2160;
+            }
 
             for (uint32_t i = 0; i <= (uint32_t)nrd::Denoiser::REFERENCE; i++)
             {
                 nrd::Denoiser denoiser = (nrd::Denoiser)i;
                 const char* methodName = nrd::GetDenoiserString(denoiser);
 
-                const nrd::DenoiserDesc denoiserDesc = {0, denoiser, w, h};
+                const nrd::DenoiserDesc denoiserDesc = {0, denoiser};
 
                 nrd::InstanceCreationDesc instanceCreationDesc = {};
                 instanceCreationDesc.denoisers = &denoiserDesc;
                 instanceCreationDesc.denoisersNum = 1;
 
-                NrdIntegration instance(2);
-                NRI_ABORT_ON_FALSE( instance.Initialize(instanceCreationDesc, *m_Device, NRI, NRI) );
+                nrd::IntegrationCreationDesc desc = {};
+                desc.name = "Unused";
+                desc.queuedFrameNum = GetQueuedFrameNum();
+                desc.enableDescriptorCaching = NRD_ENABLE_WHOLE_LIFETIME_DESCRIPTOR_CACHING;
+                desc.promoteFloat16to32 = NRD_PROMOTE_FLOAT16_TO_32;
+                desc.demoteFloat32to16 = NRD_DEMOTE_FLOAT32_TO_16;
+                desc.resourceWidth = w;
+                desc.resourceHeight = h;
+
+                nrd::Integration instance;
+                NRI_ABORT_ON_FALSE( instance.Initialize(desc, instanceCreationDesc, *m_Device, NRI, NRI) );
+
                 printf("| %10s | %36s | %16.2f | %16.2f | %16.2f |\n", i == 0 ? resolution : "", methodName, instance.GetTotalMemoryUsageInMb(), instance.GetPersistentMemoryUsageInMb(), instance.GetAliasableMemoryUsageInMb());
+
                 instance.Destroy();
             }
 
-        if (j != 2)
-            printf("| %10s | %36s | %16s | %16s | %16s |\n", "", "", "", "", "");
-    }
+            if (j != 2)
+                printf("| %10s | %36s | %16s | %16s | %16s |\n", "", "", "", "", "");
+        }
 
-    __debugbreak();
+        __debugbreak();
 #endif
 
     LoadScene();
-    for (size_t i = 0; i < m_Scene.instances.size(); ++i)
-    {
+    for (size_t i = 0; i < m_Scene.instances.size(); ++i) {
         utils::Instance& instance = m_Scene.instances[i];
         utils::Material& material = m_Scene.materials[instance.materialIndex];
         instance.allowUpdate = material.IsAlphaOpaque() ? true : instance.allowUpdate;
     }
-
     GenerateGeometry(m_Scene);
+
     if (m_SceneFile.find("BistroInterior") != std::string::npos)
-         AddInnerGlassSurfaces();
+        AddInnerGlassSurfaces();
 
     GenerateAnimatedCubes();
 
@@ -1048,75 +1296,13 @@ bool Sample::Initialize(nri::GraphicsAPI graphicsAPI)
 
     UploadStaticData();
 
+#pragma region[ Omm Sample specific ]
     InitAlphaTestedGeometry();
-
     m_OmmHelper.Initialize(m_Device, m_DisableOmmBlasBuild);
     m_Profiler.Init(m_Device);
-    m_OmmGraphicsContext.Init(NRI, m_Device, nri::CommandQueueType::GRAPHICS);
-    m_OmmComputeContext.Init(NRI, m_Device, nri::CommandQueueType::COMPUTE);
+    m_OmmGraphicsContext.Init(NRI, m_Device, nri::QueueType::GRAPHICS);
+    m_OmmComputeContext.Init(NRI, m_Device, nri::QueueType::COMPUTE);
 
-    m_Camera.Initialize(m_Scene.aabb.GetCenter(), m_Scene.aabb.vMin, CAMERA_RELATIVE);
-    m_Scene.UnloadGeometryData();
-
-    const nrd::DenoiserDesc denoisersDescs[] =
-    {
-        // REBLUR
-#if( NRD_MODE == OCCLUSION )
-    #if( NRD_COMBINED == 1 )
-        { NRD_ID(REBLUR_DIFFUSE_SPECULAR_OCCLUSION), nrd::Denoiser::REBLUR_DIFFUSE_SPECULAR_OCCLUSION, (uint16_t)m_RenderResolution.x, (uint16_t)m_RenderResolution.y },
-    #else
-        { NRD_ID(REBLUR_DIFFUSE_OCCLUSION), nrd::Denoiser::REBLUR_DIFFUSE_OCCLUSION, (uint16_t)m_RenderResolution.x, (uint16_t)m_RenderResolution.y },
-        { NRD_ID(REBLUR_SPECULAR_OCCLUSION), nrd::Denoiser::REBLUR_SPECULAR_OCCLUSION, (uint16_t)m_RenderResolution.x, (uint16_t)m_RenderResolution.y },
-    #endif
-#elif( NRD_MODE == SH )
-    #if( NRD_COMBINED == 1 )
-        { NRD_ID(REBLUR_DIFFUSE_SPECULAR_SH), nrd::Denoiser::REBLUR_DIFFUSE_SPECULAR_SH, (uint16_t)m_RenderResolution.x, (uint16_t)m_RenderResolution.y },
-    #else
-        { NRD_ID(REBLUR_DIFFUSE_SH), nrd::Denoiser::REBLUR_DIFFUSE_SH, (uint16_t)m_RenderResolution.x, (uint16_t)m_RenderResolution.y },
-        { NRD_ID(REBLUR_SPECULAR_SH), nrd::Denoiser::REBLUR_SPECULAR_SH, (uint16_t)m_RenderResolution.x, (uint16_t)m_RenderResolution.y },
-    #endif
-#elif( NRD_MODE == DIRECTIONAL_OCCLUSION )
-        { NRD_ID(REBLUR_DIFFUSE_DIRECTIONAL_OCCLUSION), nrd::Denoiser::REBLUR_DIFFUSE_DIRECTIONAL_OCCLUSION, (uint16_t)m_RenderResolution.x, (uint16_t)m_RenderResolution.y },
-#else
-    #if( NRD_COMBINED == 1 )
-        { NRD_ID(REBLUR_DIFFUSE_SPECULAR), nrd::Denoiser::REBLUR_DIFFUSE_SPECULAR, (uint16_t)m_RenderResolution.x, (uint16_t)m_RenderResolution.y },
-    #else
-        { NRD_ID(REBLUR_DIFFUSE), nrd::Denoiser::REBLUR_DIFFUSE, (uint16_t)m_RenderResolution.x, (uint16_t)m_RenderResolution.y },
-        { NRD_ID(REBLUR_SPECULAR), nrd::Denoiser::REBLUR_SPECULAR, (uint16_t)m_RenderResolution.x, (uint16_t)m_RenderResolution.y },
-    #endif
-#endif
-
-        // RELAX
-#if( NRD_MODE == SH )
-    #if( NRD_COMBINED == 1 )
-        { NRD_ID(RELAX_DIFFUSE_SPECULAR_SH), nrd::Denoiser::RELAX_DIFFUSE_SPECULAR_SH, (uint16_t)m_RenderResolution.x, (uint16_t)m_RenderResolution.y },
-    #else
-        { NRD_ID(RELAX_DIFFUSE_SH), nrd::Denoiser::RELAX_DIFFUSE_SH, (uint16_t)m_RenderResolution.x, (uint16_t)m_RenderResolution.y },
-        { NRD_ID(RELAX_SPECULAR_SH), nrd::Denoiser::RELAX_SPECULAR_SH, (uint16_t)m_RenderResolution.x, (uint16_t)m_RenderResolution.y },
-    #endif
-#else
-    #if( NRD_COMBINED == 1 )
-        { NRD_ID(RELAX_DIFFUSE_SPECULAR), nrd::Denoiser::RELAX_DIFFUSE_SPECULAR, (uint16_t)m_RenderResolution.x, (uint16_t)m_RenderResolution.y },
-    #else
-        { NRD_ID(RELAX_DIFFUSE), nrd::Denoiser::RELAX_DIFFUSE, (uint16_t)m_RenderResolution.x, (uint16_t)m_RenderResolution.y },
-        { NRD_ID(RELAX_SPECULAR), nrd::Denoiser::RELAX_SPECULAR, (uint16_t)m_RenderResolution.x, (uint16_t)m_RenderResolution.y },
-    #endif
-#endif
-
-        // SIGMA
-#if( NRD_MODE != OCCLUSION && NRD_MODE != DIRECTIONAL_OCCLUSION )
-        { NRD_ID(SIGMA_SHADOW_TRANSLUCENCY), nrd::Denoiser::SIGMA_SHADOW_TRANSLUCENCY, (uint16_t)m_RenderResolution.x, (uint16_t)m_RenderResolution.y },
-#endif
-
-        // REFERENCE
-        { NRD_ID(REFERENCE), nrd::Denoiser::REFERENCE, (uint16_t)m_RenderResolution.x, (uint16_t)m_RenderResolution.y },
-    };
-
-    nrd::InstanceCreationDesc instanceCreationDesc = {};
-    instanceCreationDesc.denoisers = denoisersDescs;
-    instanceCreationDesc.denoisersNum = helper::GetCountOf(denoisersDescs);
-
-    NRI_ABORT_ON_FALSE( m_NRD.Initialize(instanceCreationDesc, *m_Device, NRI, NRI) );
 
     size_t sceneBeginNameOffset = m_SceneFile.find_last_of("/");
     sceneBeginNameOffset = sceneBeginNameOffset == std::string::npos ? 0 : ++sceneBeginNameOffset;
@@ -1126,8 +1312,7 @@ bool Sample::Initialize(nri::GraphicsAPI graphicsAPI)
 
     float3 cameraInitialPos = m_Scene.aabb.GetCenter();
     float3 lookAtPos = m_Scene.aabb.vMin;
-    if (m_SceneFile.find("BistroExterior") != std::string::npos)
-    {
+    if (m_SceneFile.find("BistroExterior") != std::string::npos) {
         cameraInitialPos = float3(49.545f, -38.352f, 6.916f);
         float3 realLookAtPos = float3(41.304f, -26.487f, 4.805f);
         float3 hackedDir = realLookAtPos - cameraInitialPos;
@@ -1135,30 +1320,44 @@ bool Sample::Initialize(nri::GraphicsAPI graphicsAPI)
         lookAtPos = cameraInitialPos + hackedDir;
     }
     m_Camera.Initialize(cameraInitialPos, lookAtPos, CAMERA_RELATIVE);
+
+    if (NRI.GetDeviceDesc(*m_Device).graphicsAPI == nri::GraphicsAPI::D3D12) {
+        std::string windowTitle = std::string(glfwGetWindowTitle(m_Window));
+#if DXR_OMM
+        windowTitle += " [DXR 1.2]";
+#else
+        windowTitle += " [NVAPI]";
+#endif
+        glfwSetWindowTitle(m_Window, windowTitle.c_str());
+    }
+#pragma endregion
+
     m_Scene.UnloadGeometryData();
 
     m_SettingsDefault = m_Settings;
+    m_ShowValidationOverlay = m_DebugNRD;
 
-    return CreateUserInterface(*m_Device, NRI, NRI, swapChainFormat);
+    nri::VideoMemoryInfo videoMemoryInfo = {};
+    NRI.QueryVideoMemoryInfo(*m_Device, nri::MemoryLocation::DEVICE, videoMemoryInfo);
+    printf("Allocated %.2f Mb\n", videoMemoryInfo.usageSize / (1024.0f * 1024.0f));
+
+    return InitImgui(*m_Device);
 }
 
-void Sample::OmmNriContext::Init(const NRIInterface& NRI, nri::Device* device, nri::CommandQueueType type)
-{
-    NRI_ABORT_ON_FAILURE(NRI.GetCommandQueue(*device, type, commandQueue));
-    NRI_ABORT_ON_FAILURE(NRI.CreateCommandAllocator(*commandQueue, nri::WHOLE_DEVICE_GROUP, commandAllocator));
+void Sample::OmmNriContext::Init(const NRIInterface& NRI, nri::Device* device, nri::QueueType type) {
+    NRI_ABORT_ON_FAILURE(NRI.GetQueue(*device, type, 0, commandQueue));
+    NRI_ABORT_ON_FAILURE(NRI.CreateCommandAllocator(*commandQueue, commandAllocator));
     NRI_ABORT_ON_FAILURE(NRI.CreateCommandBuffer(*commandAllocator, commandBuffer));
     NRI_ABORT_ON_FAILURE(NRI.CreateFence(*device, 0, fence));
 }
 
-void Sample::OmmNriContext::Destroy(const NRIInterface& NRI)
-{
+void Sample::OmmNriContext::Destroy(const NRIInterface& NRI) {
     NRI.DestroyFence(*fence);
     NRI.DestroyCommandBuffer(*commandBuffer);
     NRI.DestroyCommandAllocator(*commandAllocator);
 }
 
-void BindBuffersToMemory(NRIInterface& nri, nri::Device* device, nri::Buffer** buffers, size_t count, std::vector<nri::Memory*>& memories, nri::MemoryLocation location)
-{
+void BindBuffersToMemory(NRIInterface& nri, nri::Device* device, nri::Buffer** buffers, size_t count, std::vector<nri::Memory*>& memories, nri::MemoryLocation location) {
     nri::ResourceGroupDesc resourceGroupDesc = {};
     resourceGroupDesc.buffers = buffers;
     resourceGroupDesc.bufferNum = (uint32_t)count;
@@ -1168,24 +1367,20 @@ void BindBuffersToMemory(NRIInterface& nri, nri::Device* device, nri::Buffer** b
     NRI_ABORT_ON_FAILURE(nri.AllocateAndBindMemory(*device, resourceGroupDesc, memories.data() + allocationOffset));
 }
 
-nri::AccelerationStructure* Sample::GetMaskedBlas(uint64_t insatanceMask)
-{
+nri::AccelerationStructure* Sample::GetMaskedBlas(uint64_t insatanceMask) {
     const auto& it = m_InstanceMaskToMaskedBlasData.find(insatanceMask);
     if (it != m_InstanceMaskToMaskedBlasData.end())
         return it->second.blas;
     return nullptr;
 }
 
-std::vector<uint32_t> FilterOutAlphaTestedGeometry(const utils::Scene& scene)
-{ // Filter out alphaOpaque geometry by mesh and material IDs
+std::vector<uint32_t> FilterOutAlphaTestedGeometry(const utils::Scene& scene) { // Filter out alphaOpaque geometry by mesh and material IDs
     std::vector<uint32_t> result;
     std::set<uint64_t> processedCombinations;
-    for (uint32_t instaceId = 0; instaceId < (uint32_t)scene.instances.size(); ++instaceId)
-    {
+    for (uint32_t instaceId = 0; instaceId < (uint32_t)scene.instances.size(); ++instaceId) {
         const utils::Instance& instance = scene.instances[instaceId];
         const utils::Material& material = scene.materials[instance.materialIndex];
-        if (material.IsAlphaOpaque())
-        {
+        if (material.IsAlphaOpaque()) {
             uint64_t mask = uint64_t(instance.meshInstanceIndex) << 32 | uint64_t(instance.materialIndex);
             size_t currentCount = processedCombinations.size();
             processedCombinations.insert(mask);
@@ -1197,8 +1392,7 @@ std::vector<uint32_t> FilterOutAlphaTestedGeometry(const utils::Scene& scene)
     return result;
 }
 
-void Sample::InitAlphaTestedGeometry()
-{
+void Sample::InitAlphaTestedGeometry() {
     printf("[OMM] Initializing Alpha Tested Geometry\n");
     std::vector<uint32_t> alphaInstances = FilterOutAlphaTestedGeometry(m_Scene);
 
@@ -1211,8 +1405,7 @@ void Sample::InitAlphaTestedGeometry()
     size_t indexBufferSize = 0;
     size_t uvBufferSize = 0;
 
-    for (size_t i = 0; i < alphaInstances.size(); ++i)
-    { // Calculate buffer sizes
+    for (size_t i = 0; i < alphaInstances.size(); ++i) { // Calculate buffer sizes
         const utils::Instance& instance = m_Scene.instances[alphaInstances[i]];
         const utils::Mesh& mesh = m_Scene.meshes[instance.meshInstanceIndex];
 
@@ -1228,8 +1421,7 @@ void Sample::InitAlphaTestedGeometry()
 
     { // Cteate buffers
         nri::BufferDesc bufferDesc = {};
-        bufferDesc.physicalDeviceMask = nri::WHOLE_DEVICE_GROUP;
-        bufferDesc.usageMask = nri::BufferUsageBits::SHADER_RESOURCE | nri::BufferUsageBits::ACCELERATION_STRUCTURE_BUILD_READ;
+        bufferDesc.usage = nri::BufferUsageBits::SHADER_RESOURCE | nri::BufferUsageBits::ACCELERATION_STRUCTURE_BUILD_INPUT;
 
         bufferDesc.size = positionBufferSize;
         NRI_ABORT_ON_FAILURE(NRI.CreateBuffer(*m_Device, bufferDesc, positionBuffer));
@@ -1237,24 +1429,23 @@ void Sample::InitAlphaTestedGeometry()
         bufferDesc.size = indexBufferSize;
         NRI_ABORT_ON_FAILURE(NRI.CreateBuffer(*m_Device, bufferDesc, indexBuffer));
 
-        //uv buffer is used in OMM baking as a raw read buffer. For compatibility with Vulkan this buffer is required to be structured
-        bufferDesc.usageMask = nri::BufferUsageBits::SHADER_RESOURCE;
+        // uv buffer is used in OMM baking as a raw read buffer. For compatibility with Vulkan this buffer is required to be structured
+        bufferDesc.usage = nri::BufferUsageBits::SHADER_RESOURCE;
         bufferDesc.size = uvBufferSize;
         bufferDesc.structureStride = sizeof(uint32_t);
         NRI_ABORT_ON_FAILURE(NRI.CreateBuffer(*m_Device, bufferDesc, uvBuffer));
     }
 
-    //raw data for uploading to gpu
+    // raw data for uploading to gpu
     std::vector<uint8_t> positions;
     std::vector<uint8_t> uvs;
     std::vector<uint8_t> indices;
 
-    uint32_t storageAlignment = NRI.GetDeviceDesc(*m_Device).storageBufferOffsetAlignment;
-    uint32_t bufferAlignment = NRI.GetDeviceDesc(*m_Device).typedBufferOffsetAlignment;
+    uint32_t storageAlignment = NRI.GetDeviceDesc(*m_Device).memoryAlignment.bufferShaderResourceOffset;
+    uint32_t bufferAlignment = storageAlignment;
 
     nri::Texture** materialTextures = m_Textures.data() + (size_t)Texture::MaterialTextures;
-    for (size_t i = 0; i < alphaInstances.size(); ++i)
-    {
+    for (size_t i = 0; i < alphaInstances.size(); ++i) {
         const utils::Instance& instance = m_Scene.instances[alphaInstances[i]];
         const utils::Mesh& mesh = m_Scene.meshes[instance.meshInstanceIndex];
         const utils::Material& material = m_Scene.materials[instance.materialIndex];
@@ -1274,16 +1465,14 @@ void Sample::InitAlphaTestedGeometry()
         geometry.positionBufferSize = positionBufferSize;
         positions.resize(geometry.positionOffset + helper::Align(positionDataSize, bufferAlignment));
 
-        for (uint32_t y = 0; y < mesh.vertexNum; ++y)
-        {
+        for (uint32_t y = 0; y < mesh.vertexNum; ++y) {
             uint32_t offset = mesh.vertexOffset + y;
             memcpy(geometry.uvData.data() + y * sizeof(float2), m_Scene.unpackedVertices[offset].uv, sizeof(float2));
 
-            float3 position =
-            {
-                m_Scene.unpackedVertices[offset].position[0],
-                m_Scene.unpackedVertices[offset].position[1],
-                m_Scene.unpackedVertices[offset].position[2],
+            float3 position = {
+                m_Scene.unpackedVertices[offset].pos[0],
+                m_Scene.unpackedVertices[offset].pos[1],
+                m_Scene.unpackedVertices[offset].pos[2],
             };
             const size_t positionStride = sizeof(float3);
             void* dst = positions.data() + geometry.positionOffset + (y * positionStride);
@@ -1314,32 +1503,23 @@ void Sample::InitAlphaTestedGeometry()
     std::vector<nri::BufferUploadDesc> uploadDescs;
     {
         nri::BufferUploadDesc desc = {};
-        desc.prevAccess = nri::AccessBits::UNKNOWN;
-        desc.nextAccess = nri::AccessBits::SHADER_RESOURCE;
-
+        desc.after.access = nri::AccessBits::SHADER_RESOURCE;
         desc.buffer = positionBuffer;
-        desc.bufferOffset = 0;
         desc.data = positions.data();
-        desc.dataSize = positionBufferSize;
         uploadDescs.push_back(desc);
 
         desc.buffer = uvBuffer;
-        desc.bufferOffset = 0;
         desc.data = uvs.data();
-        desc.dataSize = uvBufferSize;
         uploadDescs.push_back(desc);
 
         desc.buffer = indexBuffer;
-        desc.bufferOffset = 0;
         desc.data = indices.data();
-        desc.dataSize = indexBufferSize;
         uploadDescs.push_back(desc);
     }
-    NRI.UploadData(*m_CommandQueue, nullptr, 0, uploadDescs.data(), (uint32_t)uploadDescs.size());
+    NRI.UploadData(*m_GraphicsQueue, nullptr, 0, uploadDescs.data(), (uint32_t)uploadDescs.size());
 }
 
-void PreprocessAlphaTexture(detexTexture* texture, std::vector<uint8_t>& outAlphaChannel)
-{
+void PreprocessAlphaTexture(detexTexture* texture, std::vector<uint8_t>& outAlphaChannel) {
     uint8_t* pixels = texture->data;
     std::vector<uint8_t> decompressedImage;
     uint32_t format = texture->format;
@@ -1348,8 +1528,7 @@ void PreprocessAlphaTexture(detexTexture* texture, std::vector<uint8_t>& outAlph
         if (originalFormat == DETEX_TEXTURE_FORMAT_BC1)
             texture->format = DETEX_TEXTURE_FORMAT_BC1A;
 
-        if (detexFormatIsCompressed(texture->format))
-        {
+        if (detexFormatIsCompressed(texture->format)) {
             uint32_t size = uint32_t(texture->width) * uint32_t(texture->height) * detexGetPixelSize(DETEX_PIXEL_FORMAT_RGBA8);
             decompressedImage.resize(size);
             detexDecompressTextureLinear(texture, &decompressedImage[0], DETEX_PIXEL_FORMAT_RGBA8);
@@ -1363,17 +1542,13 @@ void PreprocessAlphaTexture(detexTexture* texture, std::vector<uint8_t>& outAlph
     uint32_t pixelCount = texture->width * texture->height;
     outAlphaChannel.reserve(pixelCount);
 
-    for (uint32_t i = 0; i < pixelCount; ++i)
-    {
+    for (uint32_t i = 0; i < pixelCount; ++i) {
         uint32_t offset = i * pixelSize;
         uint32_t alphaValue;
-        if (pixelSize == 4)
-        {
+        if (pixelSize == 4) {
             uint32_t pixel = *(uint32_t*)(pixels + offset);
             alphaValue = detexPixel32GetA8(pixel);
-        }
-        else
-        {
+        } else {
             uint64_t pixel = *(uint64_t*)(pixels + offset);
             alphaValue = (uint32_t)detexPixel64GetA16(pixel);
         }
@@ -1381,23 +1556,19 @@ void PreprocessAlphaTexture(detexTexture* texture, std::vector<uint8_t>& outAlph
     }
 }
 
-inline bool AreBakerOutputsOnGPU(const ommhelper::OmmBakeGeometryDesc& instance)
-{
+inline bool AreBakerOutputsOnGPU(const ommhelper::OmmBakeGeometryDesc& instance) {
     bool result = true;
     for (uint32_t i = 0; i < (uint32_t)ommhelper::OmmDataLayout::CpuMaxNum; ++i)
         result &= bool(instance.gpuBuffers[i].dataSize);
     return result;
 }
 
-void Sample::FillOmmBakerInputs()
-{
+void Sample::FillOmmBakerInputs() {
     std::map<uint64_t, size_t> materialMaskToTextureDataOffset;
-    if (m_OmmBakeDesc.type == ommhelper::OmmBakerType::CPU)
-    { // Decompress textures and store alpha channel in a separate buffer for cpu baker
+    if (m_OmmBakeDesc.type == ommhelper::OmmBakerType::CPU) { // Decompress textures and store alpha channel in a separate buffer for cpu baker
         std::set<uint32_t> uniqueMaterialIds;
         std::vector<uint8_t> workVector;
-        for (size_t i = 0; i < m_OmmAlphaGeometry.size(); ++i)
-        { // Sort out unique textures to avoid resource duplication
+        for (size_t i = 0; i < m_OmmAlphaGeometry.size(); ++i) { // Sort out unique textures to avoid resource duplication
             AlphaTestedGeometry& geometry = m_OmmAlphaGeometry[i];
             ommhelper::InputTexture& bakerTexure = geometry.bakeDesc.texture;
             uint32_t materialId = geometry.materialIndex;
@@ -1416,10 +1587,9 @@ void Sample::FillOmmBakerInputs()
             size_t uniqueMaterialsNum = uniqueMaterialIds.size();
             uniqueMaterialIds.insert(materialId);
             if (uniqueMaterialsNum == uniqueMaterialIds.size())
-                continue;//duplication
+                continue; // duplication
 
-            for (uint32_t mip = 0; mip < mipRange; ++mip)
-            {
+            for (uint32_t mip = 0; mip < mipRange; ++mip) {
                 uint32_t mipId = textureMipOffset + mip;
                 detexTexture* texture = (detexTexture*)utilsTexture->mips[mipId];
 
@@ -1433,8 +1603,7 @@ void Sample::FillOmmBakerInputs()
         }
     }
 
-    for (size_t i = 0; i < m_OmmAlphaGeometry.size(); ++i)
-    { // Fill baking queue desc
+    for (size_t i = 0; i < m_OmmAlphaGeometry.size(); ++i) { // Fill baking queue desc
         bool isGpuBaker = m_OmmBakeDesc.type == ommhelper::OmmBakerType::GPU;
 
         AlphaTestedGeometry& geometry = m_OmmAlphaGeometry[i];
@@ -1445,8 +1614,7 @@ void Sample::FillOmmBakerInputs()
 
         ommhelper::InputTexture bakerTexture = ommDesc.texture;
         utils::Texture* utilsTexture = m_Scene.textures[material.baseColorTexIndex];
-        if (isGpuBaker)
-        {
+        if (isGpuBaker) {
             ommDesc.indices.nriBufferOrPtr.buffer = geometry.indices;
             ommDesc.uvs.nriBufferOrPtr.buffer = geometry.uvs;
             uint32_t minMip = utilsTexture->GetMipNum() - 1;
@@ -1455,16 +1623,15 @@ void Sample::FillOmmBakerInputs()
             ommDesc.texture.mipNum = 1; // gpu baker currently doesn't support multiple mips
             ommhelper::MipDesc& mipDesc = ommDesc.texture.mips[0];
             mipDesc.nriTextureOrPtr.texture = texture;
-            mipDesc.width = reinterpret_cast<detexTexture*>(utilsTexture->mips[bakerTexture.mipOffset])->width;;
-            mipDesc.height = reinterpret_cast<detexTexture*>(utilsTexture->mips[bakerTexture.mipOffset])->height;;
-        }
-        else
-        {
+            mipDesc.width = reinterpret_cast<detexTexture*>(utilsTexture->mips[bakerTexture.mipOffset])->width;
+            ;
+            mipDesc.height = reinterpret_cast<detexTexture*>(utilsTexture->mips[bakerTexture.mipOffset])->height;
+            ;
+        } else {
             ommDesc.indices.nriBufferOrPtr.ptr = (void*)geometry.indexData.data();
             ommDesc.uvs.nriBufferOrPtr.ptr = (void*)geometry.uvData.data();
 
-            for (uint32_t mip = 0; mip < bakerTexture.mipNum; ++mip)
-            {
+            for (uint32_t mip = 0; mip < bakerTexture.mipNum; ++mip) {
                 uint32_t mipId = bakerTexture.mipOffset + mip;
                 uint64_t materialMask = uint64_t(geometry.materialIndex) << 32 | uint64_t(mipId);
                 size_t texDataOffset = materialMaskToTextureDataOffset.find(materialMask)->second;
@@ -1499,12 +1666,10 @@ void Sample::FillOmmBakerInputs()
     }
 }
 
-void PrepareOmmUsageCountsBuffers(ommhelper::OpacityMicroMapsHelper& ommHelper, ommhelper::OmmBakeGeometryDesc& desc)
-{ // Sanitize baker outputed usageCounts buffers to fit GAPI format
-    uint32_t usageCountBuffers[] = { (uint32_t)ommhelper::OmmDataLayout::DescArrayHistogram, (uint32_t)ommhelper::OmmDataLayout::IndexHistogram };
+void PrepareOmmUsageCountsBuffers(ommhelper::OpacityMicroMapsHelper& ommHelper, ommhelper::OmmBakeGeometryDesc& desc) { // Sanitize baker outputed usageCounts buffers to fit GAPI format
+    uint32_t usageCountBuffers[] = {(uint32_t)ommhelper::OmmDataLayout::DescArrayHistogram, (uint32_t)ommhelper::OmmDataLayout::IndexHistogram};
 
-    for (size_t i = 0; i < helper::GetCountOf(usageCountBuffers); ++i)
-    {
+    for (size_t i = 0; i < helper::GetCountOf(usageCountBuffers); ++i) {
         std::vector<uint8_t> buffer = desc.outData[usageCountBuffers[i]];
         size_t convertedCountsSize = 0;
         ommHelper.ConvertUsageCountsToApiFormat(nullptr, convertedCountsSize, buffer.data(), buffer.size());
@@ -1513,18 +1678,15 @@ void PrepareOmmUsageCountsBuffers(ommhelper::OpacityMicroMapsHelper& ommHelper, 
     }
 }
 
-void PrepareCpuBuilderInputs(NRIInterface& NRI, const OmmBatch& batch, std::vector<AlphaTestedGeometry>& geometries)
-{ // Copy raw mask data to the upload heaps to use during micromap and blas build
-    for (size_t i = batch.offset; i < batch.offset + batch.count; ++i)
-    {
+void PrepareCpuBuilderInputs(NRIInterface& NRI, const OmmBatch& batch, std::vector<AlphaTestedGeometry>& geometries) { // Copy raw mask data to the upload heaps to use during micromap and blas build
+    for (size_t i = batch.offset; i < batch.offset + batch.count; ++i) {
         AlphaTestedGeometry& geometry = geometries[i];
         const ommhelper::OmmBakeGeometryDesc& bakeResult = geometry.bakeDesc;
         if (bakeResult.outData[(uint32_t)ommhelper::OmmDataLayout::DescArrayHistogram].empty())
             continue;
 
         ommhelper::MaskedGeometryBuildDesc& buildDesc = geometry.buildDesc;
-        for (uint32_t y = 0; y < (uint32_t)ommhelper::OmmDataLayout::BlasBuildGpuBuffersNum; ++y)
-        {
+        for (uint32_t y = 0; y < (uint32_t)ommhelper::OmmDataLayout::BlasBuildGpuBuffersNum; ++y) {
             nri::Buffer* buffer = buildDesc.inputs.buffers[y].buffer;
             uint64_t mapSize = (uint64_t)bakeResult.outData[y].size();
             void* map = NRI.MapBuffer(*buffer, 0, mapSize);
@@ -1534,14 +1696,12 @@ void PrepareCpuBuilderInputs(NRIInterface& NRI, const OmmBatch& batch, std::vect
     }
 }
 
-void Sample::FillOmmBlasBuildQueue(const OmmBatch& batch, std::vector<ommhelper::MaskedGeometryBuildDesc*>& outBuildQueue)
-{
+void Sample::FillOmmBlasBuildQueue(const OmmBatch& batch, std::vector<ommhelper::MaskedGeometryBuildDesc*>& outBuildQueue) {
     outBuildQueue.clear();
     outBuildQueue.reserve(batch.count);
 
     size_t uploadBufferOffset = m_OmmCpuUploadBuffers.size();
-    for (size_t id = batch.offset; id < batch.offset + batch.count; ++id)
-    {
+    for (size_t id = batch.offset; id < batch.offset + batch.count; ++id) {
         AlphaTestedGeometry& geometry = m_OmmAlphaGeometry[id];
         ommhelper::OmmBakeGeometryDesc& bakeResult = geometry.bakeDesc;
         ommhelper::MaskedGeometryBuildDesc& buildDesc = geometry.buildDesc;
@@ -1568,19 +1728,14 @@ void Sample::FillOmmBlasBuildQueue(const OmmBatch& batch, std::vector<ommhelper:
 
         PrepareOmmUsageCountsBuffers(m_OmmHelper, bakeResult);
 
-        if (AreBakerOutputsOnGPU(bakeResult))
-        {
+        if (AreBakerOutputsOnGPU(bakeResult)) {
             for (uint32_t j = 0; j < (uint32_t)ommhelper::OmmDataLayout::BlasBuildGpuBuffersNum; ++j)
                 buildDesc.inputs.buffers[j] = bakeResult.gpuBuffers[j];
-        }
-        else
-        { // Create upload buffers to store baker output during ommArray/blas creation
+        } else { // Create upload buffers to store baker output during ommArray/blas creation
             nri::BufferDesc bufferDesc = {};
-            bufferDesc.physicalDeviceMask = 0;
-            bufferDesc.usageMask = nri::BufferUsageBits::SHADER_RESOURCE;
+            bufferDesc.usage = nri::BufferUsageBits::SHADER_RESOURCE;
 
-            for (uint32_t j = 0; j < (uint32_t)ommhelper::OmmDataLayout::BlasBuildGpuBuffersNum; ++j)
-            {
+            for (uint32_t j = 0; j < (uint32_t)ommhelper::OmmDataLayout::BlasBuildGpuBuffersNum; ++j) {
                 bufferDesc.size = bakeResult.outData[j].size();
                 buildDesc.inputs.buffers[j].dataSize = bufferDesc.size;
                 buildDesc.inputs.buffers[j].bufferSize = bufferDesc.size;
@@ -1597,27 +1752,23 @@ void Sample::FillOmmBlasBuildQueue(const OmmBatch& batch, std::vector<ommhelper:
         outBuildQueue.push_back(&buildDesc);
     }
 
-    if (m_OmmCpuUploadBuffers.empty() == false)
-    { // Bind cpu baker output memories
+    if (m_OmmCpuUploadBuffers.empty() == false) { // Bind cpu baker output memories
         size_t uploadBufferCount = m_OmmCpuUploadBuffers.size() - uploadBufferOffset;
         BindBuffersToMemory(NRI, m_Device, m_OmmCpuUploadBuffers.data() + uploadBufferOffset, uploadBufferCount, m_OmmTmpAllocations, nri::MemoryLocation::HOST_UPLOAD);
         PrepareCpuBuilderInputs(NRI, batch, m_OmmAlphaGeometry);
     }
 
-    for (size_t id = batch.offset; id < batch.offset + batch.count; ++id)
-    { // Release raw cpu side data. In case of cpu baker it's in the upload heaps, in case of gpu it's already saved as cache
+    for (size_t id = batch.offset; id < batch.offset + batch.count; ++id) { // Release raw cpu side data. In case of cpu baker it's in the upload heaps, in case of gpu it's already saved as cache
         AlphaTestedGeometry& geometry = m_OmmAlphaGeometry[id];
         ommhelper::OmmBakeGeometryDesc& bakeResult = geometry.bakeDesc;
-        for (uint32_t k = 0; k < (uint32_t)ommhelper::OmmDataLayout::BlasBuildGpuBuffersNum; ++k)
-        {
-             bakeResult.outData[k].resize(0);
-             bakeResult.outData[k].shrink_to_fit();
+        for (uint32_t k = 0; k < (uint32_t)ommhelper::OmmDataLayout::BlasBuildGpuBuffersNum; ++k) {
+            bakeResult.outData[k].resize(0);
+            bakeResult.outData[k].shrink_to_fit();
         }
     }
 }
 
-void CopyBatchToReadBackBuffer(const NRIInterface& NRI, nri::CommandBuffer* commandBuffer, ommhelper::OmmBakeGeometryDesc& firstInBatch, ommhelper::OmmBakeGeometryDesc& lastInBatch, uint32_t bufferId)
-{
+void CopyBatchToReadBackBuffer(const NRIInterface& NRI, nri::CommandBuffer* commandBuffer, ommhelper::OmmBakeGeometryDesc& firstInBatch, ommhelper::OmmBakeGeometryDesc& lastInBatch, uint32_t bufferId) {
     ommhelper::GpuBakerBuffer& firstResource = firstInBatch.gpuBuffers[bufferId];
     ommhelper::GpuBakerBuffer& lastResource = lastInBatch.gpuBuffers[bufferId];
     ommhelper::GpuBakerBuffer& firstReadback = firstInBatch.readBackBuffers[bufferId];
@@ -1627,12 +1778,11 @@ void CopyBatchToReadBackBuffer(const NRIInterface& NRI, nri::CommandBuffer* comm
     size_t srcOffset = firstResource.offset;
     size_t dstOffset = firstReadback.offset;
 
-    size_t size = (lastResource.offset + lastResource.dataSize) - firstResource.offset;//total size of baker output for the batch
-    NRI.CmdCopyBuffer(*commandBuffer, *dst, 0, dstOffset, *src, 0, srcOffset, size);
+    size_t size = (lastResource.offset + lastResource.dataSize) - firstResource.offset; // total size of baker output for the batch
+    NRI.CmdCopyBuffer(*commandBuffer, *dst, dstOffset, *src, srcOffset, size);
 }
 
-void CopyFromReadBackBuffer(const NRIInterface& NRI, ommhelper::OmmBakeGeometryDesc& desc, size_t id)
-{
+void CopyFromReadBackBuffer(const NRIInterface& NRI, ommhelper::OmmBakeGeometryDesc& desc, size_t id) {
     ommhelper::GpuBakerBuffer& resource = desc.readBackBuffers[id];
     nri::Buffer* readback = resource.buffer;
 
@@ -1648,40 +1798,34 @@ void CopyFromReadBackBuffer(const NRIInterface& NRI, ommhelper::OmmBakeGeometryD
     NRI.UnmapBuffer(*readback);
 }
 
-OmmGpuBakerPrebuildMemoryStats Sample::GetGpuBakerPrebuildMemoryStats(bool printStats)
-{
+OmmGpuBakerPrebuildMemoryStats Sample::GetGpuBakerPrebuildMemoryStats(bool printStats) {
     OmmGpuBakerPrebuildMemoryStats result = {};
-    uint32_t sizeAlignment = NRI.GetDeviceDesc(*m_Device).storageBufferOffsetAlignment;
-    for (size_t i = 0; i < m_OmmAlphaGeometry.size(); ++i)
-    {
+    uint32_t sizeAlignment = NRI.GetDeviceDesc(*m_Device).memoryAlignment.micromapOffset;
+    for (size_t i = 0; i < m_OmmAlphaGeometry.size(); ++i) {
         AlphaTestedGeometry& geometry = m_OmmAlphaGeometry[i];
         ommhelper::OmmBakeGeometryDesc& instance = geometry.bakeDesc;
         ommhelper::OmmBakeGeometryDesc::GpuBakerPrebuildInfo& gpuBakerPreBuildInfo = instance.gpuBakerPreBuildInfo;
 
-        for (uint32_t y = 0; y < (uint32_t)ommhelper::OmmDataLayout::GpuOutputNum; ++y)
-        {
+        for (uint32_t y = 0; y < (uint32_t)ommhelper::OmmDataLayout::GpuOutputNum; ++y) {
             gpuBakerPreBuildInfo.dataSizes[y] = helper::Align(gpuBakerPreBuildInfo.dataSizes[y], sizeAlignment);
             result.outputTotalSizes[y] += gpuBakerPreBuildInfo.dataSizes[y];
             result.outputMaxSizes[y] = std::max<size_t>(gpuBakerPreBuildInfo.dataSizes[y], result.outputMaxSizes[y]);
             result.total += gpuBakerPreBuildInfo.dataSizes[y];
         }
 
-        for (size_t y = 0; y < OMM_MAX_TRANSIENT_POOL_BUFFERS; ++y)
-        {
+        for (size_t y = 0; y < OMM_MAX_TRANSIENT_POOL_BUFFERS; ++y) {
             gpuBakerPreBuildInfo.transientBufferSizes[y] = helper::Align(gpuBakerPreBuildInfo.transientBufferSizes[y], sizeAlignment);
             result.maxTransientBufferSizes[y] = std::max(result.maxTransientBufferSizes[y], gpuBakerPreBuildInfo.transientBufferSizes[y]);
         }
     }
 
     auto toBytes = [](size_t sizeInMb) -> size_t { return sizeInMb * 1024 * 1024; };
-    const size_t defaultSizes[] = { toBytes(64), toBytes(5), toBytes(5), toBytes(5), toBytes(5), 1024 };
+    const size_t defaultSizes[] = {toBytes(64), toBytes(5), toBytes(5), toBytes(5), toBytes(5), 1024};
 
-    if (m_OmmBakeDesc.type == ommhelper::OmmBakerType::GPU && printStats)
-    {
+    if (m_OmmBakeDesc.type == ommhelper::OmmBakerType::GPU && printStats) {
         uint64_t totalPrimitiveNum = 0;
         uint64_t maxPrimitiveNum = 0;
-        for (auto& geomtry : m_OmmAlphaGeometry)
-        {
+        for (auto& geomtry : m_OmmAlphaGeometry) {
             uint64_t numPrimitives = geomtry.bakeDesc.indices.numElements / 3;
             totalPrimitiveNum += numPrimitives;
             maxPrimitiveNum = std::max<uint64_t>(maxPrimitiveNum, numPrimitives);
@@ -1702,28 +1846,24 @@ OmmGpuBakerPrebuildMemoryStats Sample::GetGpuBakerPrebuildMemoryStats(bool print
     return result;
 }
 
-std::vector<OmmBatch> GetGpuBakerBatches(const std::vector<AlphaTestedGeometry>& geometries, const OmmGpuBakerPrebuildMemoryStats& memoryStats, const size_t batchSize)
-{
+std::vector<OmmBatch> GetGpuBakerBatches(const std::vector<AlphaTestedGeometry>& geometries, const OmmGpuBakerPrebuildMemoryStats& memoryStats, const size_t batchSize) {
     const size_t batchMaxSize = batchSize > geometries.size() ? geometries.size() : batchSize;
     std::vector<OmmBatch> batches(1);
     size_t accumulation[(uint32_t)ommhelper::OmmDataLayout::GpuOutputNum] = {};
-    for (size_t i = 0; i < geometries.size(); ++i)
-    {
+    for (size_t i = 0; i < geometries.size(); ++i) {
         const AlphaTestedGeometry& geometry = geometries[i];
         const ommhelper::OmmBakeGeometryDesc& bakeDesc = geometry.bakeDesc;
         const ommhelper::OmmBakeGeometryDesc::GpuBakerPrebuildInfo& info = bakeDesc.gpuBakerPreBuildInfo;
 
         bool isAnyOverLimit = false;
         size_t nextSizes[(uint32_t)ommhelper::OmmDataLayout::GpuOutputNum] = {};
-        for (uint32_t y = 0; y < (uint32_t)ommhelper::OmmDataLayout::GpuOutputNum; ++y)
-        {
+        for (uint32_t y = 0; y < (uint32_t)ommhelper::OmmDataLayout::GpuOutputNum; ++y) {
             nextSizes[y] = accumulation[y] + info.dataSizes[y];
             isAnyOverLimit |= nextSizes[y] > memoryStats.outputMaxSizes[y];
         }
 
-        if (isAnyOverLimit)
-        {
-            batches.push_back({ i, 1 });
+        if (isAnyOverLimit) {
+            batches.push_back({i, 1});
             for (uint32_t y = 0; y < (uint32_t)ommhelper::OmmDataLayout::GpuOutputNum; ++y)
                 accumulation[y] = info.dataSizes[y];
             continue;
@@ -1733,11 +1873,9 @@ std::vector<OmmBatch> GetGpuBakerBatches(const std::vector<AlphaTestedGeometry>&
             accumulation[y] = nextSizes[y];
 
         ++batches.back().count;
-        if (batches.back().count >= batchMaxSize)
-        {
-            if (i + 1 < geometries.size())
-            {
-                batches.push_back({ i + 1, 0 });
+        if (batches.back().count >= batchMaxSize) {
+            if (i + 1 < geometries.size()) {
+                batches.push_back({i + 1, 0});
                 for (uint32_t y = 0; y < (uint32_t)ommhelper::OmmDataLayout::GpuOutputNum; ++y)
                     accumulation[y] = 0;
                 continue;
@@ -1747,18 +1885,19 @@ std::vector<OmmBatch> GetGpuBakerBatches(const std::vector<AlphaTestedGeometry>&
     return batches;
 }
 
-void Sample::CreateAndBindGpuBakerReadbackBuffer(const OmmGpuBakerPrebuildMemoryStats& memoryStats)
-{ // for caching gpu produced omm_sdk output
+void Sample::CreateAndBindGpuBakerReadbackBuffer(const OmmGpuBakerPrebuildMemoryStats& memoryStats) { // for caching gpu produced omm_sdk output
     size_t dataTypeBegin = (size_t)ommhelper::OmmDataLayout::ArrayData;
     size_t dataTypeEnd = (size_t)ommhelper::OmmDataLayout::DescArrayHistogram;
+    size_t micromapAlignment = NRI.GetDeviceDesc(*m_Device).memoryAlignment.micromapOffset;
     {
-        for (size_t i = dataTypeBegin; i < dataTypeEnd; ++i)
-        {
+        for (size_t i = dataTypeBegin; i < dataTypeEnd; ++i) {
             nri::BufferDesc bufferDesc = {};
-            bufferDesc.physicalDeviceMask = 0;
             bufferDesc.structureStride = sizeof(uint32_t);
-            bufferDesc.size = memoryStats.outputTotalSizes[i];
-            bufferDesc.usageMask = nri::BufferUsageBits::NONE;
+            size_t s = memoryStats.outputTotalSizes[i];
+            size_t a = micromapAlignment;
+            bufferDesc.size = ((s + a - 1) / a) * a;
+            // bufferDesc.size = memoryStats.outputTotalSizes[i];
+            bufferDesc.usage = nri::BufferUsageBits::NONE;
             NRI_ABORT_ON_FAILURE(NRI.CreateBuffer(*m_Device, bufferDesc, m_OmmGpuReadbackBuffers[i]));
         }
         BindBuffersToMemory(NRI, m_Device, &m_OmmGpuReadbackBuffers[dataTypeBegin], dataTypeEnd - dataTypeBegin, m_OmmBakerAllocations, nri::MemoryLocation::HOST_READBACK);
@@ -1766,12 +1905,10 @@ void Sample::CreateAndBindGpuBakerReadbackBuffer(const OmmGpuBakerPrebuildMemory
 
     { // bind baker instances to the buffer
         size_t perDataTypeOffsets[(size_t)ommhelper::OmmDataLayout::GpuOutputNum] = {};
-        for (size_t id = 0; id < m_OmmAlphaGeometry.size(); ++id)
-        {
+        for (size_t id = 0; id < m_OmmAlphaGeometry.size(); ++id) {
             AlphaTestedGeometry& geometry = m_OmmAlphaGeometry[id];
             ommhelper::OmmBakeGeometryDesc& desc = geometry.bakeDesc;
-            for (size_t i = dataTypeBegin; i < dataTypeEnd; ++i)
-            {
+            for (size_t i = dataTypeBegin; i < dataTypeEnd; ++i) {
                 ommhelper::GpuBakerBuffer& resource = desc.readBackBuffers[i];
                 size_t& offset = perDataTypeOffsets[i];
 
@@ -1785,21 +1922,19 @@ void Sample::CreateAndBindGpuBakerReadbackBuffer(const OmmGpuBakerPrebuildMemory
     }
 }
 
-void Sample::CreateAndBindGpuBakerArrayDataBuffer(const OmmGpuBakerPrebuildMemoryStats& memoryStats)
-{ // in case of using setup pass of OMM-SDK, array data buffer allocation must be done separately
+void Sample::CreateAndBindGpuBakerArrayDataBuffer(const OmmGpuBakerPrebuildMemoryStats& memoryStats) { // in case of using setup pass of OMM-SDK, array data buffer allocation must be done separately
     const uint32_t arrayDataId = (uint32_t)ommhelper::OmmDataLayout::ArrayData;
-
+    const size_t ommAlignment = NRI.GetDeviceDesc(*m_Device).memoryAlignment.micromapOffset;
     nri::BufferDesc bufferDesc = {};
-    bufferDesc.physicalDeviceMask = 0;
     bufferDesc.structureStride = sizeof(uint32_t);
     bufferDesc.size = memoryStats.outputTotalSizes[arrayDataId];
-    bufferDesc.usageMask = nri::BufferUsageBits::SHADER_RESOURCE_STORAGE | nri::BufferUsageBits::SHADER_RESOURCE;
+    bufferDesc.size = helper::Align(bufferDesc.size, ommAlignment);
+    bufferDesc.usage = nri::BufferUsageBits::SHADER_RESOURCE_STORAGE | nri::BufferUsageBits::SHADER_RESOURCE;
     NRI_ABORT_ON_FAILURE(NRI.CreateBuffer(*m_Device, bufferDesc, m_OmmGpuOutputBuffers[arrayDataId]));
     BindBuffersToMemory(NRI, m_Device, &m_OmmGpuOutputBuffers[arrayDataId], 1, m_OmmBakerAllocations, nri::MemoryLocation::DEVICE);
 
     size_t offset = 0;
-    for (size_t id = 0; id < m_OmmAlphaGeometry.size(); ++id)
-    {
+    for (size_t id = 0; id < m_OmmAlphaGeometry.size(); ++id) {
         AlphaTestedGeometry& geometry = m_OmmAlphaGeometry[id];
         ommhelper::OmmBakeGeometryDesc& desc = geometry.bakeDesc;
         ommhelper::GpuBakerBuffer& resource = desc.gpuBuffers[arrayDataId];
@@ -1812,41 +1947,35 @@ void Sample::CreateAndBindGpuBakerArrayDataBuffer(const OmmGpuBakerPrebuildMemor
     }
 }
 
-void Sample::CreateAndBindGpuBakerSatitcBuffers(const OmmGpuBakerPrebuildMemoryStats& memoryStats)
-{
+void Sample::CreateAndBindGpuBakerSatitcBuffers(const OmmGpuBakerPrebuildMemoryStats& memoryStats) {
     const size_t postBakeReadbackDataBegin = (size_t)ommhelper::OmmDataLayout::DescArrayHistogram;
     const size_t staticDataBegin = (size_t)ommhelper::OmmDataLayout::DescArray;
     const size_t buffersEnd = (size_t)ommhelper::OmmDataLayout::GpuOutputNum;
 
     nri::BufferDesc bufferDesc = {};
-    bufferDesc.physicalDeviceMask = 0;
     bufferDesc.structureStride = sizeof(uint32_t);
 
     std::vector<nri::Buffer*> gpuBuffers;
     std::vector<nri::Buffer*> readbackBuffers;
-    for (size_t i = staticDataBegin; i < buffersEnd; ++i)
-    {
+    for (size_t i = staticDataBegin; i < buffersEnd; ++i) {
         bufferDesc.size = memoryStats.outputTotalSizes[i];
-        bufferDesc.usageMask = nri::BufferUsageBits::SHADER_RESOURCE_STORAGE | nri::BufferUsageBits::SHADER_RESOURCE;
+        bufferDesc.usage = nri::BufferUsageBits::SHADER_RESOURCE_STORAGE | nri::BufferUsageBits::SHADER_RESOURCE;
         NRI_ABORT_ON_FAILURE(NRI.CreateBuffer(*m_Device, bufferDesc, m_OmmGpuOutputBuffers[i]));
         gpuBuffers.push_back(m_OmmGpuOutputBuffers[i]);
     }
 
-    for (size_t i = 0; i < OMM_MAX_TRANSIENT_POOL_BUFFERS; ++i)
-    {
+    for (size_t i = 0; i < OMM_MAX_TRANSIENT_POOL_BUFFERS; ++i) {
         bufferDesc.size = memoryStats.maxTransientBufferSizes[i];
-        if (bufferDesc.size)
-        {
-            bufferDesc.usageMask = nri::BufferUsageBits::SHADER_RESOURCE_STORAGE | nri::BufferUsageBits::SHADER_RESOURCE | nri::BufferUsageBits::ARGUMENT_BUFFER;
+        if (bufferDesc.size) {
+            bufferDesc.usage = nri::BufferUsageBits::SHADER_RESOURCE_STORAGE | nri::BufferUsageBits::SHADER_RESOURCE | nri::BufferUsageBits::ARGUMENT_BUFFER;
             NRI_ABORT_ON_FAILURE(NRI.CreateBuffer(*m_Device, bufferDesc, m_OmmGpuTransientBuffers[i]));
             gpuBuffers.push_back(m_OmmGpuTransientBuffers[i]);
         }
     }
 
-    for (size_t i = postBakeReadbackDataBegin; i < buffersEnd; ++i)
-    {
+    for (size_t i = postBakeReadbackDataBegin; i < buffersEnd; ++i) {
         bufferDesc.size = memoryStats.outputTotalSizes[i];
-        bufferDesc.usageMask = nri::BufferUsageBits::NONE;
+        bufferDesc.usage = nri::BufferUsageBits::NONE;
         NRI_ABORT_ON_FAILURE(NRI.CreateBuffer(*m_Device, bufferDesc, m_OmmGpuReadbackBuffers[i]));
         readbackBuffers.push_back(m_OmmGpuReadbackBuffers[i]);
     }
@@ -1858,12 +1987,10 @@ void Sample::CreateAndBindGpuBakerSatitcBuffers(const OmmGpuBakerPrebuildMemoryS
 
     size_t gpuOffsetsPerType[(uint32_t)ommhelper::OmmDataLayout::GpuOutputNum] = {};
     size_t readBackOffsetsPerType[(uint32_t)ommhelper::OmmDataLayout::GpuOutputNum] = {};
-    for (size_t id = 0; id < m_OmmAlphaGeometry.size(); ++id)
-    {
+    for (size_t id = 0; id < m_OmmAlphaGeometry.size(); ++id) {
         AlphaTestedGeometry& geometry = m_OmmAlphaGeometry[id];
         ommhelper::OmmBakeGeometryDesc& desc = geometry.bakeDesc;
-        for (uint32_t j = staticDataBegin; j < (uint32_t)ommhelper::OmmDataLayout::GpuOutputNum; ++j)
-        {
+        for (uint32_t j = staticDataBegin; j < (uint32_t)ommhelper::OmmDataLayout::GpuOutputNum; ++j) {
             ommhelper::GpuBakerBuffer& resource = desc.gpuBuffers[j];
             size_t& offset = gpuOffsetsPerType[j];
 
@@ -1874,8 +2001,7 @@ void Sample::CreateAndBindGpuBakerSatitcBuffers(const OmmGpuBakerPrebuildMemoryS
             offset += desc.gpuBakerPreBuildInfo.dataSizes[j];
         }
 
-        for (uint32_t j = postBakeReadbackDataBegin; j < (uint32_t)ommhelper::OmmDataLayout::GpuOutputNum; ++j)
-        {
+        for (uint32_t j = postBakeReadbackDataBegin; j < (uint32_t)ommhelper::OmmDataLayout::GpuOutputNum; ++j) {
             ommhelper::GpuBakerBuffer& resource = desc.readBackBuffers[j];
             size_t& offset = readBackOffsetsPerType[j];
 
@@ -1886,8 +2012,7 @@ void Sample::CreateAndBindGpuBakerSatitcBuffers(const OmmGpuBakerPrebuildMemoryS
             offset += resource.dataSize;
         }
 
-        for (size_t j = 0; j < OMM_MAX_TRANSIENT_POOL_BUFFERS; ++j)
-        {
+        for (size_t j = 0; j < OMM_MAX_TRANSIENT_POOL_BUFFERS; ++j) {
             desc.transientBuffers[j].buffer = m_OmmGpuTransientBuffers[j];
             desc.transientBuffers[j].bufferSize = memoryStats.maxTransientBufferSizes[j];
             desc.transientBuffers[j].dataSize = memoryStats.maxTransientBufferSizes[j];
@@ -1896,35 +2021,30 @@ void Sample::CreateAndBindGpuBakerSatitcBuffers(const OmmGpuBakerPrebuildMemoryS
     }
 }
 
-void Sample::SaveMaskCache(const OmmBatch& batch)
-{
+void Sample::SaveMaskCache(const OmmBatch& batch) {
     std::string cacheFileName = GetOmmCacheFilename();
     ommhelper::OmmCaching::CreateFolder(m_OmmCacheFolderName.c_str());
     uint64_t stateMask = ommhelper::OmmCaching::CalculateSateHash(m_OmmBakeDesc);
 
-    for (size_t id = batch.offset; id < batch.offset + batch.count; ++id)
-    {
+    for (size_t id = batch.offset; id < batch.offset + batch.count; ++id) {
         AlphaTestedGeometry& geometry = m_OmmAlphaGeometry[id];
         ommhelper::OmmBakeGeometryDesc& bakeResults = geometry.bakeDesc;
         uint64_t hash = GetInstanceHash(geometry.meshIndex, geometry.materialIndex);
 
         bool isDataValid = true;
         ommhelper::OmmCaching::OmmData data;
-        for (uint32_t i = 0; i < (uint32_t)ommhelper::OmmDataLayout::CpuMaxNum; ++i)
-        {
+        for (uint32_t i = 0; i < (uint32_t)ommhelper::OmmDataLayout::CpuMaxNum; ++i) {
             data.data[i] = bakeResults.outData[i].data();
             data.sizes[i] = bakeResults.outData[i].size();
             isDataValid &= data.sizes[i] > 0;
         }
-        if(isDataValid)
+        if (isDataValid)
             ommhelper::OmmCaching::SaveMasksToDisc(cacheFileName.c_str(), data, stateMask, hash, (uint16_t)bakeResults.outOmmIndexFormat);
     }
 }
 
-void Sample::InitializeOmmGeometryFromCache(const OmmBatch& batch, std::vector<ommhelper::OmmBakeGeometryDesc*>& outBakeQueue)
-{ // Init geometry from cache. If cache not found add it to baking queue
-    if (m_OmmBakeDesc.enableCache == false)
-    {
+void Sample::InitializeOmmGeometryFromCache(const OmmBatch& batch, std::vector<ommhelper::OmmBakeGeometryDesc*>& outBakeQueue) { // Init geometry from cache. If cache not found add it to baking queue
+    if (m_OmmBakeDesc.enableCache == false) {
         for (size_t i = batch.offset; i < batch.offset + batch.count; ++i)
             outBakeQueue.push_back(&m_OmmAlphaGeometry[i].bakeDesc);
         return;
@@ -1932,44 +2052,45 @@ void Sample::InitializeOmmGeometryFromCache(const OmmBatch& batch, std::vector<o
 
     printf("Read cache. ");
     uint64_t stateMask = ommhelper::OmmCaching::CalculateSateHash(m_OmmBakeDesc);
-    for (size_t i = batch.offset; i < batch.offset + batch.count; ++i)
-    {
+    for (size_t i = batch.offset; i < batch.offset + batch.count; ++i) {
         AlphaTestedGeometry& geometry = m_OmmAlphaGeometry[i];
         ommhelper::OmmBakeGeometryDesc& instance = geometry.bakeDesc;
 
         uint64_t hash = GetInstanceHash(geometry.meshIndex, geometry.materialIndex);
         ommhelper::OmmCaching::OmmData data = {};
-        if (ommhelper::OmmCaching::ReadMaskFromCache(GetOmmCacheFilename().c_str(), data, stateMask, hash, nullptr))
-        {
-            for (uint32_t j = 0; j < (uint32_t)ommhelper::OmmDataLayout::CpuMaxNum; ++j)
-            {
+        if (ommhelper::OmmCaching::ReadMaskFromCache(GetOmmCacheFilename().c_str(), data, stateMask, hash, nullptr)) {
+            for (uint32_t j = 0; j < (uint32_t)ommhelper::OmmDataLayout::CpuMaxNum; ++j) {
                 instance.outData[j].resize(data.sizes[j]);
                 data.data[j] = instance.outData[j].data();
             }
             ommhelper::OmmCaching::ReadMaskFromCache(GetOmmCacheFilename().c_str(), data, stateMask, hash, (uint16_t*)&instance.outOmmIndexFormat);
-            instance.outOmmIndexStride = instance.outOmmIndexFormat == nri::Format::R8_UINT ? sizeof(uint8_t) : instance.outOmmIndexFormat == nri::Format::R16_UINT ? sizeof(uint16_t) : sizeof(uint32_t);
+            instance.outOmmIndexStride = instance.outOmmIndexFormat == nri::Format::R8_UINT ? sizeof(uint8_t) : instance.outOmmIndexFormat == nri::Format::R16_UINT ? sizeof(uint16_t)
+                                                                                                                                                                    : sizeof(uint32_t);
             instance.outDescArrayHistogramCount = uint32_t(data.sizes[(uint32_t)ommhelper::OmmDataLayout::DescArrayHistogram] / (uint64_t)sizeof(ommCpuOpacityMicromapUsageCount));
             instance.outIndexHistogramCount = uint32_t(data.sizes[(uint32_t)ommhelper::OmmDataLayout::IndexHistogram] / (uint64_t)sizeof(ommCpuOpacityMicromapUsageCount));
-        }
-        else
+        } else
             outBakeQueue.push_back(&instance);
     }
 }
 
-inline void SubmitQueueWorkAndWait(const NRIInterface& NRI, nri::CommandBuffer* commandBuffer, nri::CommandQueue* queue, nri::Fence* fence, uint64_t& currentFenceValue)
-{
+inline void SubmitQueueWorkAndWait(const NRIInterface& NRI, nri::CommandBuffer* commandBuffer, nri::Queue* queue, nri::Fence* fence, uint64_t& currentFenceValue) {
+    nri::FenceSubmitDesc fenceSubmitDesc = {};
+    fenceSubmitDesc.fence = fence;
+    fenceSubmitDesc.stages = nri::StageBits::ALL;
+    fenceSubmitDesc.value = ++currentFenceValue;
+
     nri::QueueSubmitDesc workSubmissionDesc = {};
     workSubmissionDesc.commandBuffers = &commandBuffer;
     workSubmissionDesc.commandBufferNum = 1;
+    workSubmissionDesc.signalFences = &fenceSubmitDesc;
+    workSubmissionDesc.signalFenceNum = 1;
     NRI.QueueSubmit(*queue, workSubmissionDesc);
-    NRI.QueueSignal(*queue, *fence, ++currentFenceValue);
     NRI.Wait(*fence, currentFenceValue);
 }
 
-void Sample::RunOmmSetupPass(OmmNriContext& context, ommhelper::OmmBakeGeometryDesc** queue, size_t count, OmmGpuBakerPrebuildMemoryStats& memoryStats)
-{ // Run prepass to get correct size of omm array data buffer
+void Sample::RunOmmSetupPass(OmmNriContext& context, ommhelper::OmmBakeGeometryDesc** queue, size_t count, OmmGpuBakerPrebuildMemoryStats& memoryStats) { // Run prepass to get correct size of omm array data buffer
     NRI.ResetCommandAllocator(*context.commandAllocator);
-    NRI.BeginCommandBuffer(*context.commandBuffer, nullptr, nri::WHOLE_DEVICE_GROUP);
+    NRI.BeginCommandBuffer(*context.commandBuffer, nullptr);
     {
         m_OmmHelper.BakeOpacityMicroMapsGpu(context.commandBuffer, queue, count, m_OmmBakeDesc, ommhelper::OmmGpuBakerPass::Setup);
         CopyBatchToReadBackBuffer(NRI, context.commandBuffer, *queue[0], *queue[count - 1], (uint32_t)ommhelper::OmmDataLayout::GpuPostBuildInfo);
@@ -1978,8 +2099,7 @@ void Sample::RunOmmSetupPass(OmmNriContext& context, ommhelper::OmmBakeGeometryD
     SubmitQueueWorkAndWait(NRI, context.commandBuffer, context.commandQueue, context.fence, context.fenceValue);
     m_OmmHelper.GpuPostBakeCleanUp();
 
-    for (size_t i = 0; i < count; ++i)
-    { // Get actual data sizes from postbuild info
+    for (size_t i = 0; i < count; ++i) { // Get actual data sizes from postbuild info
         ommhelper::OmmBakeGeometryDesc& desc = *queue[i];
         CopyFromReadBackBuffer(NRI, desc, (uint32_t)ommhelper::OmmDataLayout::GpuPostBuildInfo);
         ommGpuPostDispatchInfo postbildInfo = *(ommGpuPostDispatchInfo*)desc.outData[(uint32_t)ommhelper::OmmDataLayout::GpuPostBuildInfo].data();
@@ -1988,10 +2108,9 @@ void Sample::RunOmmSetupPass(OmmNriContext& context, ommhelper::OmmBakeGeometryD
     memoryStats = GetGpuBakerPrebuildMemoryStats(true);
 }
 
-void Sample::BakeOmmGpu(OmmNriContext& context, std::vector<ommhelper::OmmBakeGeometryDesc*>& batch)
-{
+void Sample::BakeOmmGpu(OmmNriContext& context, std::vector<ommhelper::OmmBakeGeometryDesc*>& batch) {
     NRI.ResetCommandAllocator(*context.commandAllocator);
-    NRI.BeginCommandBuffer(*context.commandBuffer, nullptr, nri::WHOLE_DEVICE_GROUP);
+    NRI.BeginCommandBuffer(*context.commandBuffer, nullptr);
     {
         m_OmmHelper.BakeOpacityMicroMapsGpu(context.commandBuffer, batch.data(), batch.size(), m_OmmBakeDesc, ommhelper::OmmGpuBakerPass::Bake);
         CopyBatchToReadBackBuffer(NRI, context.commandBuffer, *batch[0], *batch.back(), (uint32_t)ommhelper::OmmDataLayout::DescArrayHistogram);
@@ -2002,14 +2121,12 @@ void Sample::BakeOmmGpu(OmmNriContext& context, std::vector<ommhelper::OmmBakeGe
     SubmitQueueWorkAndWait(NRI, context.commandBuffer, context.commandQueue, context.fence, context.fenceValue);
     m_OmmHelper.GpuPostBakeCleanUp();
 
-    if (m_OmmBakeDesc.enableCache)
-    {
+    if (m_OmmBakeDesc.enableCache) {
         printf("Readback. ");
         NRI.ResetCommandAllocator(*context.commandAllocator);
-        NRI.BeginCommandBuffer(*context.commandBuffer, nullptr, nri::WHOLE_DEVICE_GROUP);
+        NRI.BeginCommandBuffer(*context.commandBuffer, nullptr);
         {
-            for (size_t i = 0; i < batch.size(); ++i)
-            { // Get actual data sizes from postbuild info
+            for (size_t i = 0; i < batch.size(); ++i) { // Get actual data sizes from postbuild info
                 ommhelper::OmmBakeGeometryDesc& desc = *batch[i];
                 CopyFromReadBackBuffer(NRI, desc, (uint32_t)ommhelper::OmmDataLayout::GpuPostBuildInfo);
                 ommGpuPostDispatchInfo postbildInfo = *(ommGpuPostDispatchInfo*)desc.outData[(uint32_t)ommhelper::OmmDataLayout::GpuPostBuildInfo].data();
@@ -2030,14 +2147,12 @@ void Sample::BakeOmmGpu(OmmNriContext& context, std::vector<ommhelper::OmmBakeGe
         SubmitQueueWorkAndWait(NRI, context.commandBuffer, context.commandQueue, context.fence, context.fenceValue);
     }
 
-    for (size_t i = 0; i < batch.size(); ++i)
-    {
+    for (size_t i = 0; i < batch.size(); ++i) {
         ommhelper::OmmBakeGeometryDesc& desc = *batch[i];
         CopyFromReadBackBuffer(NRI, desc, (uint32_t)ommhelper::OmmDataLayout::DescArrayHistogram);
         CopyFromReadBackBuffer(NRI, desc, (uint32_t)ommhelper::OmmDataLayout::IndexHistogram);
 
-        if (m_OmmBakeDesc.enableCache)
-        {
+        if (m_OmmBakeDesc.enableCache) {
             CopyFromReadBackBuffer(NRI, desc, (uint32_t)ommhelper::OmmDataLayout::ArrayData);
             CopyFromReadBackBuffer(NRI, desc, (uint32_t)ommhelper::OmmDataLayout::DescArray);
             CopyFromReadBackBuffer(NRI, desc, (uint32_t)ommhelper::OmmDataLayout::Indices);
@@ -2045,20 +2160,17 @@ void Sample::BakeOmmGpu(OmmNriContext& context, std::vector<ommhelper::OmmBakeGe
     }
 }
 
-void Sample::OmmGeometryUpdate(OmmNriContext& context, bool doBatching)
-{
+void Sample::OmmGeometryUpdate(OmmNriContext& context, bool doBatching) {
     ReleaseMaskedGeometry();
     FillOmmBakerInputs();
     OmmGpuBakerPrebuildMemoryStats memoryStats = {};
     std::vector<OmmBatch> batches = GetGpuBakerBatches(m_OmmAlphaGeometry, memoryStats, 1);
 
-    if (m_OmmBakeDesc.type == ommhelper::OmmBakerType::GPU)
-    {
+    if (m_OmmBakeDesc.type == ommhelper::OmmBakerType::GPU) {
         std::vector<ommhelper::OmmBakeGeometryDesc*> queue;
         uint64_t stateMask = ommhelper::OmmCaching::CalculateSateHash(m_OmmBakeDesc);
 
-        for (size_t instanceId = 0; instanceId < m_OmmAlphaGeometry.size(); ++instanceId)
-        { // skip prepass for instances with cache
+        for (size_t instanceId = 0; instanceId < m_OmmAlphaGeometry.size(); ++instanceId) { // skip prepass for instances with cache
             AlphaTestedGeometry& geometry = m_OmmAlphaGeometry[instanceId];
             uint64_t hash = GetInstanceHash(geometry.meshIndex, geometry.materialIndex);
             if (ommhelper::OmmCaching::LookForCache(GetOmmCacheFilename().c_str(), stateMask, hash) && m_OmmBakeDesc.enableCache)
@@ -2066,13 +2178,12 @@ void Sample::OmmGeometryUpdate(OmmNriContext& context, bool doBatching)
             queue.push_back(&geometry.bakeDesc);
         }
 
-        if (queue.empty() == false)
-        { // perform setup pass
+        if (queue.empty() == false) { // perform setup pass
             m_OmmHelper.GetGpuBakerPrebuildInfo(queue.data(), queue.size(), m_OmmBakeDesc);
             memoryStats = GetGpuBakerPrebuildMemoryStats(false); // arrayData size calculation is conservative here
 
             CreateAndBindGpuBakerSatitcBuffers(memoryStats); // create buffers which sizes are correctly calculated in GetGpuBakerPrebuildInfo()
-            { // get actual arrayData buffer sizes. GetGpuBakerPrebuildInfo() returns conservative arrayData size estimation
+            {                                                // get actual arrayData buffer sizes. GetGpuBakerPrebuildInfo() returns conservative arrayData size estimation
                 RunOmmSetupPass(context, queue.data(), queue.size(), memoryStats);
             }
             CreateAndBindGpuBakerArrayDataBuffer(memoryStats);
@@ -2080,73 +2191,69 @@ void Sample::OmmGeometryUpdate(OmmNriContext& context, bool doBatching)
             if (m_OmmBakeDesc.enableCache)
                 CreateAndBindGpuBakerReadbackBuffer(memoryStats);
 
-            if (doBatching)
-            {
+            if (doBatching) {
                 batches.clear();
-                batches.push_back({ 0, m_OmmAlphaGeometry.size() });
+                batches.push_back({0, m_OmmAlphaGeometry.size()});
             }
         }
     }
 
-    for (size_t batchId = 0; batchId < batches.size(); ++batchId)
-    {
+    for (size_t batchId = 0; batchId < batches.size(); ++batchId) {
         const OmmBatch& batch = batches[batchId];
         printf("\r%s\r[OMM] Batch [%llu / %llu]: ", std::string(100, ' ').c_str(), batchId + 1, batches.size());
         std::vector<ommhelper::OmmBakeGeometryDesc*> bakeQueue;
         InitializeOmmGeometryFromCache(batch, bakeQueue);
 
-        if (!bakeQueue.empty())
-        {
+        if (!bakeQueue.empty()) {
             printf("Bake. ");
             if (m_OmmBakeDesc.type == ommhelper::OmmBakerType::GPU)
                 BakeOmmGpu(context, bakeQueue);
             else
                 m_OmmHelper.BakeOpacityMicroMapsCpu(bakeQueue.data(), bakeQueue.size(), m_OmmBakeDesc);
 
-            if (m_OmmBakeDesc.enableCache)
-            {
+            if (m_OmmBakeDesc.enableCache) {
                 printf("Save cache. ");
                 SaveMaskCache(batch);
             }
         }
 
-        if (m_DisableOmmBlasBuild == false)
-        {
+        if (m_DisableOmmBlasBuild == false) {
             printf("Build. ");
 
             std::vector<ommhelper::MaskedGeometryBuildDesc*> buildQueue = {};
             FillOmmBlasBuildQueue(batch, buildQueue);
 
             NRI.ResetCommandAllocator(*context.commandAllocator);
-            NRI.BeginCommandBuffer(*context.commandBuffer, nullptr, nri::WHOLE_DEVICE_GROUP);
+            NRI.BeginCommandBuffer(*context.commandBuffer, nullptr);
             {
                 m_OmmHelper.BuildMaskedGeometry(buildQueue.data(), buildQueue.size(), context.commandBuffer);
             }
             NRI.EndCommandBuffer(*context.commandBuffer);
             SubmitQueueWorkAndWait(NRI, context.commandBuffer, context.commandQueue, context.fence, context.fenceValue);
 
-            for (size_t id = batch.offset; id < batch.offset + batch.count; ++id)
-            {
+            for (size_t id = batch.offset; id < batch.offset + batch.count; ++id) {
                 AlphaTestedGeometry& geometry = m_OmmAlphaGeometry[id];
                 ommhelper::MaskedGeometryBuildDesc& buildDesc = geometry.buildDesc;
                 if (!buildDesc.outputs.blas)
                     continue;
 
                 uint64_t mask = GetInstanceHash(m_OmmAlphaGeometry[id].meshIndex, m_OmmAlphaGeometry[id].materialIndex);
-                OmmBlas ommBlas = { buildDesc.outputs.blas, buildDesc.outputs.ommArray };
+                OmmBlas ommBlas = {buildDesc.outputs.blas, buildDesc.outputs.ommArray};
                 m_InstanceMaskToMaskedBlasData.insert(std::make_pair(mask, ommBlas));
-                m_MaskedBlasses.push_back({ buildDesc.outputs.blas, buildDesc.outputs.ommArray });
+                m_MaskedBlasses.push_back({buildDesc.outputs.blas, buildDesc.outputs.ommArray});
             }
         }
 
         // Free cpu side memories with batch lifecycle
         for (auto& buffer : m_OmmCpuUploadBuffers)
             NRI.DestroyBuffer(*buffer);
-        m_OmmCpuUploadBuffers.resize(0); m_OmmCpuUploadBuffers.shrink_to_fit();
+        m_OmmCpuUploadBuffers.resize(0);
+        m_OmmCpuUploadBuffers.shrink_to_fit();
 
         for (auto& memory : m_OmmTmpAllocations)
             NRI.FreeMemory(*memory);
-        m_OmmTmpAllocations.resize(0); m_OmmTmpAllocations.shrink_to_fit();
+        m_OmmTmpAllocations.resize(0);
+        m_OmmTmpAllocations.shrink_to_fit();
 
         m_OmmUpdateProgress += (uint32_t)batch.count;
     }
@@ -2156,10 +2263,9 @@ void Sample::OmmGeometryUpdate(OmmNriContext& context, bool doBatching)
     m_OmmUpdateProgress = 0;
 }
 
-void Sample::RebuildOmmGeometryAsync(uint32_t const* frameId)
-{
+void Sample::RebuildOmmGeometryAsync(uint32_t const* frameId) {
     uint32_t fistFrame = *frameId;
-    uint32_t endFrame = fistFrame + BUFFERED_FRAME_MAX_NUM;
+    uint32_t endFrame = fistFrame + GetOptimalSwapChainTextureNum();
     m_InstanceMaskToMaskedBlasData.clear(); // stop using masked geometry here
 
     while (*frameId < endFrame)
@@ -2168,14 +2274,12 @@ void Sample::RebuildOmmGeometryAsync(uint32_t const* frameId)
     OmmGeometryUpdate(m_OmmComputeContext, false);
 }
 
-void Sample::RebuildOmmGeometry()
-{
-    NRI.WaitForIdle(*m_CommandQueue);
+void Sample::RebuildOmmGeometry() {
+    NRI.WaitForIdle(*m_GraphicsQueue);
     OmmGeometryUpdate(m_OmmGraphicsContext, true);
 }
 
-void Sample::ReleaseMaskedGeometry()
-{
+void Sample::ReleaseMaskedGeometry() {
     for (auto& resource : m_MaskedBlasses)
         m_OmmHelper.DestroyMaskedGeometry(resource.blas, resource.ommArray);
 
@@ -2184,10 +2288,8 @@ void Sample::ReleaseMaskedGeometry()
     m_OmmHelper.ReleaseGeometryMemory();
 }
 
-void Sample::ReleaseBakingResources()
-{
-    for (AlphaTestedGeometry& geometry : m_OmmAlphaGeometry)
-    {
+void Sample::ReleaseBakingResources() {
+    for (AlphaTestedGeometry& geometry : m_OmmAlphaGeometry) {
         geometry.bakeDesc = {};
         geometry.buildDesc = {};
     }
@@ -2196,12 +2298,9 @@ void Sample::ReleaseBakingResources()
     m_OmmRawAlphaChannelForCpuBaker.shrink_to_fit();
 
     // Destroy buffers
-    auto DestroyBuffers = [](NRIInterface& nri, nri::Buffer** buffers, uint32_t count)
-    {
-        for (uint32_t i = 0; i < count; ++i)
-        {
-            if (buffers[i])
-            {
+    auto DestroyBuffers = [](NRIInterface& nri, nri::Buffer** buffers, uint32_t count) {
+        for (uint32_t i = 0; i < count; ++i) {
+            if (buffers[i]) {
                 nri.DestroyBuffer(*buffers[i]);
                 buffers[i] = nullptr;
             }
@@ -2213,22 +2312,24 @@ void Sample::ReleaseBakingResources()
 
     for (auto& buffer : m_OmmCpuUploadBuffers)
         NRI.DestroyBuffer(*buffer);
-    m_OmmCpuUploadBuffers.resize(0); m_OmmCpuUploadBuffers.shrink_to_fit();
+    m_OmmCpuUploadBuffers.resize(0);
+    m_OmmCpuUploadBuffers.shrink_to_fit();
 
     // Release memories
     for (auto& memory : m_OmmTmpAllocations)
         NRI.FreeMemory(*memory);
-    m_OmmTmpAllocations.resize(0); m_OmmTmpAllocations.shrink_to_fit();
+    m_OmmTmpAllocations.resize(0);
+    m_OmmTmpAllocations.shrink_to_fit();
 
     for (auto& memory : m_OmmBakerAllocations)
         NRI.FreeMemory(*memory);
-    m_OmmBakerAllocations.resize(0); m_OmmBakerAllocations.shrink_to_fit();
+    m_OmmBakerAllocations.resize(0);
+    m_OmmBakerAllocations.shrink_to_fit();
 
     m_OmmHelper.GpuPostBakeCleanUp();
 }
 
-std::vector<ommhelper::OmmBakeGeometryDesc*> GetBakingQueue(std::vector<AlphaTestedGeometry>& geometry)
-{
+std::vector<ommhelper::OmmBakeGeometryDesc*> GetBakingQueue(std::vector<AlphaTestedGeometry>& geometry) {
     std::vector<ommhelper::OmmBakeGeometryDesc*> result = {};
     result.reserve(geometry.size());
 
@@ -2238,27 +2339,23 @@ std::vector<ommhelper::OmmBakeGeometryDesc*> GetBakingQueue(std::vector<AlphaTes
     return result;
 }
 
-bool IsRebuildAvailable(ommhelper::OmmBakeDesc& updated, ommhelper::OmmBakeDesc& current)
-{
+bool IsRebuildAvailable(ommhelper::OmmBakeDesc& updated, ommhelper::OmmBakeDesc& current) {
     bool result = false;
     result |= updated.subdivisionLevel != current.subdivisionLevel;
     result |= updated.mipBias != current.mipBias;
     result |= updated.dynamicSubdivisionScale != current.dynamicSubdivisionScale;
     result |= updated.filter != current.filter;
     result |= updated.format != current.format;
-    
+
     result |= updated.type != current.type;
-    if (current.type == ommhelper::OmmBakerType::GPU)
-    {
+    if (current.type == ommhelper::OmmBakerType::GPU) {
         result |= updated.gpuFlags.computeOnlyWorkload != current.gpuFlags.computeOnlyWorkload;
         result |= updated.gpuFlags.enablePostBuildInfo != current.gpuFlags.enablePostBuildInfo;
         result |= updated.gpuFlags.enableTexCoordDeduplication != current.gpuFlags.enableTexCoordDeduplication;
         result |= updated.gpuFlags.force32bitIndices != current.gpuFlags.force32bitIndices;
         result |= updated.gpuFlags.enableSpecialIndices != current.gpuFlags.enableSpecialIndices;
         result |= updated.gpuFlags.allow8bitIndices != current.gpuFlags.allow8bitIndices;
-    }
-    else
-    {
+    } else {
         result |= updated.mipCount != current.mipCount;
         result |= updated.cpuFlags.enableInternalThreads != current.cpuFlags.enableInternalThreads;
         result |= updated.cpuFlags.enableSpecialIndices != current.cpuFlags.enableSpecialIndices;
@@ -2273,8 +2370,7 @@ bool IsRebuildAvailable(ommhelper::OmmBakeDesc& updated, ommhelper::OmmBakeDesc&
     return result;
 }
 
-void Sample::AppendOmmImguiSettings()
-{
+void Sample::AppendOmmImguiSettings() {
     static ommhelper::OmmBakeDesc bakeDesc = m_OmmBakeDesc;
 
     ImGui::PushStyleColor(ImGuiCol_Text, UI_HEADER);
@@ -2284,21 +2380,17 @@ void Sample::AppendOmmImguiSettings()
     ImGui::PopStyleColor();
     ImGui::PushID("VISIBILITY MASKS");
     {
-        if (isUnfolded)
-        {
-            if (NRI.GetDeviceDesc(*m_Device).graphicsAPI == nri::GraphicsAPI::D3D12)
-            {
+        if (isUnfolded) {
+            if (NRI.GetDeviceDesc(*m_Device).graphicsAPI == nri::GraphicsAPI::D3D12) {
 #if DXR_OMM
                 ImGui::Text("API: DXR");
-                if (ImGui::BeginItemTooltip())
-                {
+                if (ImGui::BeginItemTooltip()) {
                     ImGui::Text("OMMs are built using DXR 1.2 API");
                     ImGui::EndTooltip();
                 }
 #else
                 ImGui::Text("API: NvAPI");
-                if (ImGui::BeginItemTooltip())
-                {
+                if (ImGui::BeginItemTooltip()) {
                     ImGui::Text("OMMs are built using NvAPI");
                     ImGui::EndTooltip();
                 }
@@ -2319,14 +2411,17 @@ void Sample::AppendOmmImguiSettings()
             ImGui::Separator();
             ImGui::Text("OMM Baking Settings:");
 
-            static const char* ommBakerTypes[] = { "GPU", "CPU", };
+            static const char* ommBakerTypes[] = {
+                "GPU",
+                "CPU",
+            };
             static int ommBakerTypeSelection = (int)bakeDesc.type;
             ImGui::Combo("BakerType", &ommBakerTypeSelection, ommBakerTypes, helper::GetCountOf(ommBakerTypes));
 
             int32_t maxSubdivisionLevel = 12;
             float maxSubdivisionScale = 12.0f;
             bool isCpuBaker = ommBakerTypeSelection == 1;
-            if (isCpuBaker)//if CPU
+            if (isCpuBaker) // if CPU
             {
                 ommhelper::CpuBakerFlags& cpuFlags = bakeDesc.cpuFlags;
                 ImGui::Checkbox("SpecialIndices", &cpuFlags.enableSpecialIndices);
@@ -2336,11 +2431,10 @@ void Sample::AppendOmmImguiSettings()
                 ImGui::Checkbox("DuplicateDetection", &cpuFlags.enableDuplicateDetection);
                 ImGui::SameLine();
                 ImGui::Checkbox("NearDuplicateDetection", &cpuFlags.enableNearDuplicateDetection);
-            }
-            else //if GPU
+            } else // if GPU
             {
                 ommhelper::GpuBakerFlags& gpuFlags = bakeDesc.gpuFlags;
-                maxSubdivisionLevel = gpuFlags.computeOnlyWorkload ? 12 : 9;//gpu baker in raster mode is limited to level 9
+                maxSubdivisionLevel = gpuFlags.computeOnlyWorkload ? 12 : 9; // gpu baker in raster mode is limited to level 9
                 ImGui::Checkbox("SpecialIndices", &gpuFlags.enableSpecialIndices);
                 ImGui::SameLine();
                 ImGui::Checkbox("Compute", &gpuFlags.computeOnlyWorkload);
@@ -2354,13 +2448,19 @@ void Sample::AppendOmmImguiSettings()
             }
 
             static int ommFormatSelection = (int)bakeDesc.format;
-            static const char* ommFormatNames[] = { "OC1_2_STATE", "OC1_4_STATE", };
+            static const char* ommFormatNames[] = {
+                "OC1_2_STATE",
+                "OC1_4_STATE",
+            };
             ImGui::PushItemWidth(ImGui::CalcItemWidth() * 0.66f);
             ImGui::Combo("OMM Format", &ommFormatSelection, ommFormatNames, helper::GetCountOf(ommFormatNames));
             ImGui::PopItemWidth();
 
             static int ommFilterSelection = (int)bakeDesc.filter;
-            static const char* vmFilterNames[] = { "Nearest", "Linear", };
+            static const char* vmFilterNames[] = {
+                "Nearest",
+                "Linear",
+            };
             ImGui::PushItemWidth(ImGui::CalcItemWidth() * 0.66f);
             ImGui::Combo("Alpha Test Filter", &ommFilterSelection, vmFilterNames, helper::GetCountOf(ommFormatNames));
             ImGui::PopItemWidth();
@@ -2371,8 +2471,7 @@ void Sample::AppendOmmImguiSettings()
 
             static float subdivisionScale = bakeDesc.dynamicSubdivisionScale;
             static bool enableDynamicSubdivisionScale = true;
-            if (enableDynamicSubdivisionScale)
-            {
+            if (enableDynamicSubdivisionScale) {
                 ImGui::PushItemWidth(ImGui::CalcItemWidth() * 0.66f);
                 ImGui::SliderFloat("Subdivision Scale", &subdivisionScale, 0.1f, maxSubdivisionScale, "%.1f");
                 ImGui::PopItemWidth();
@@ -2397,8 +2496,7 @@ void Sample::AppendOmmImguiSettings()
             mipBias = mipBias > 15 ? 15 : mipBias;
             static bool enableCaching = bakeDesc.enableCache;
 
-            if (isCpuBaker)
-            {
+            if (isCpuBaker) {
                 ImGui::PushItemWidth(ImGui::CalcItemWidth() * 0.33f);
                 ImGui::InputInt("Mip Count (if applicable)", &mipCount);
                 ImGui::PopItemWidth();
@@ -2433,13 +2531,12 @@ void Sample::AppendOmmImguiSettings()
                 buttonColor = isAsyncActive ? redColor : buttonColor;
 
                 ImGui::PushStyleColor(ImGuiCol_::ImGuiCol_Button, buttonColor);
-                if ((ImGui::Button("Bake OMMs") || forceRebuild) && !isAsyncActive)
-                {
+                if ((ImGui::Button("Bake OMMs") || forceRebuild) && !isAsyncActive) {
                     m_OmmBakeDesc = bakeDesc;
 
                     bool launchAsyncTask = (m_EnableAsync && !isCpuBaker) || isCpuBaker;
                     if (launchAsyncTask)
-                        asyncUpdateTask  = std::async(std::launch::async, &Sample::RebuildOmmGeometryAsync, this, &frameId);
+                        asyncUpdateTask = std::async(std::launch::async, &Sample::RebuildOmmGeometryAsync, this, &frameId);
                     else
                         RebuildOmmGeometry();
                 }
