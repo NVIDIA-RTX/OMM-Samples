@@ -213,9 +213,9 @@ void Profiler::Init(nri::Device* device)
     workSubmissionDesc.commandBuffers = &commandBuffer;
 
     m_NRI.QueueSubmit(*commandQueue, workSubmissionDesc);
-    m_NRI.WaitForIdle(*commandQueue);
-    m_NRI.DestroyCommandBuffer(*commandBuffer);
-    m_NRI.DestroyCommandAllocator(*commandAllocator);
+    m_NRI.QueueWaitIdle(commandQueue);
+    m_NRI.DestroyCommandBuffer(commandBuffer);
+    m_NRI.DestroyCommandAllocator(commandAllocator);
 }
 
 void Profiler::ProcessContexts(const nri::QueueSubmitDesc& desc)
@@ -270,11 +270,11 @@ void Profiler::EndTimestamp(ProfilerContext* ctx, uint32_t timestampID)
 void Profiler::Destroy()
 {
     for (auto& buffer : m_QueryBuffers)
-        m_NRI.DestroyBuffer(*buffer);
+        m_NRI.DestroyBuffer(buffer);
     for (auto& pool : m_QueryPools)
-        m_NRI.DestroyQueryPool(*pool);
+        m_NRI.DestroyQueryPool(pool);
     for (auto& memory : m_Memories)
-        m_NRI.FreeMemory(*memory);
+        m_NRI.FreeMemory(memory);
     m_Memories.resize(0);
     m_Memories.shrink_to_fit();
     m_Events.resize(0);

@@ -273,28 +273,26 @@ void OmmBakerGpuIntegration::CreateGraphicsPipeline(uint32_t pipelineId, const o
     const ommGpuGraphicsPipelineDesc& pipelineDesc = pipelineInfo->pipelines[pipelineId].graphics;
     static_assert(OMM_GRAPHICS_PIPELINE_DESC_VERSION == 3, "ommGpuGraphicsPipelineDesc has changed\n");
 
-    std::vector<nri::DescriptorRangeDesc> descriptorRangeDescs(pipelineDesc.descriptorRangeNum + 1);
+    std::vector<nri::DescriptorRangeDesc> descriptorRangeDescs(pipelineDesc.descriptorRangeNum + 2); // + static samplers + constant buffer
     FillDescriptorRangeDescs(pipelineDesc.descriptorRangeNum, pipelineDesc.descriptorRanges, descriptorRangeDescs.data());
 
-    nri::DescriptorRangeDesc& staticSamplersRange = descriptorRangeDescs.back();
+    nri::DescriptorRangeDesc& staticSamplersRange = descriptorRangeDescs[pipelineDesc.descriptorRangeNum + 0];
     staticSamplersRange.baseRegisterIndex = 0;
     staticSamplersRange.descriptorNum = (uint32_t)m_Samplers.size();
     staticSamplersRange.descriptorType = nri::DescriptorType::SAMPLER;
     staticSamplersRange.flags = nri::DescriptorRangeBits::NONE;
     staticSamplersRange.shaderStages = nri::StageBits::ALL;
 
+    nri::DescriptorRangeDesc& constantBufferRange = descriptorRangeDescs[pipelineDesc.descriptorRangeNum + 1];
+    constantBufferRange.baseRegisterIndex = pipelineInfo->globalConstantBufferDesc.registerIndex;
+    constantBufferRange.descriptorNum = 1;
+    constantBufferRange.descriptorType = nri::DescriptorType::CONSTANT_BUFFER;
+    constantBufferRange.flags = nri::DescriptorRangeBits::NONE;
+    constantBufferRange.shaderStages = nri::StageBits::ALL;
+
     nri::DescriptorSetDesc descriptorSetDescs = {};
     descriptorSetDescs.rangeNum = (uint32_t)descriptorRangeDescs.size();
     descriptorSetDescs.ranges = descriptorRangeDescs.data();
-    descriptorSetDescs.dynamicConstantBufferNum = 0;
-
-    nri::DynamicConstantBufferDesc dynamicConstantBufferDesc;
-    {
-        dynamicConstantBufferDesc.registerIndex = pipelineInfo->globalConstantBufferDesc.registerIndex;
-        dynamicConstantBufferDesc.shaderStages = nri::StageBits::ALL;
-        descriptorSetDescs.dynamicConstantBuffers = &dynamicConstantBufferDesc;
-        descriptorSetDescs.dynamicConstantBufferNum = 1;
-    }
 
     nri::PipelineLayoutDesc layoutDesc = {};
     layoutDesc.descriptorSets = &descriptorSetDescs;
@@ -407,26 +405,26 @@ void OmmBakerGpuIntegration::CreateGraphicsPipeline(uint32_t pipelineId, const o
 void OmmBakerGpuIntegration::CreateComputePipeline(uint32_t id, const ommGpuPipelineInfoDesc* pipelineInfo) {
     const ommGpuComputePipelineDesc& pipelineDesc = pipelineInfo->pipelines[id].compute;
 
-    std::vector<nri::DescriptorRangeDesc> descriptorRangeDescs(pipelineDesc.descriptorRangeNum + 1);
+    std::vector<nri::DescriptorRangeDesc> descriptorRangeDescs(pipelineDesc.descriptorRangeNum + 2);
     FillDescriptorRangeDescs(pipelineDesc.descriptorRangeNum, pipelineDesc.descriptorRanges, descriptorRangeDescs.data());
 
-    nri::DescriptorRangeDesc& staticSamplersRange = descriptorRangeDescs.back();
+    nri::DescriptorRangeDesc& staticSamplersRange = descriptorRangeDescs[pipelineDesc.descriptorRangeNum + 0];
     staticSamplersRange.baseRegisterIndex = 0;
     staticSamplersRange.descriptorNum = (uint32_t)m_Samplers.size();
     staticSamplersRange.descriptorType = nri::DescriptorType::SAMPLER;
+    staticSamplersRange.flags = nri::DescriptorRangeBits::NONE;
     staticSamplersRange.shaderStages = nri::StageBits::ALL;
+
+    nri::DescriptorRangeDesc& constantBufferRange = descriptorRangeDescs[pipelineDesc.descriptorRangeNum + 1];
+    constantBufferRange.baseRegisterIndex = pipelineInfo->globalConstantBufferDesc.registerIndex;
+    constantBufferRange.descriptorNum = 1;
+    constantBufferRange.descriptorType = nri::DescriptorType::CONSTANT_BUFFER;
+    constantBufferRange.flags = nri::DescriptorRangeBits::NONE;
+    constantBufferRange.shaderStages = nri::StageBits::ALL;
 
     nri::DescriptorSetDesc descriptorSetDescs = {};
     descriptorSetDescs.rangeNum = (uint32_t)descriptorRangeDescs.size();
     descriptorSetDescs.ranges = descriptorRangeDescs.data();
-
-    nri::DynamicConstantBufferDesc dynamicConstantBufferDesc;
-    {
-        dynamicConstantBufferDesc.registerIndex = pipelineInfo->globalConstantBufferDesc.registerIndex;
-        dynamicConstantBufferDesc.shaderStages = nri::StageBits::COMPUTE_SHADER;
-        descriptorSetDescs.dynamicConstantBufferNum = 1;
-        descriptorSetDescs.dynamicConstantBuffers = &dynamicConstantBufferDesc;
-    }
 
     nri::PipelineLayoutDesc layoutDesc = {};
     layoutDesc.descriptorSets = &descriptorSetDescs;
@@ -459,7 +457,7 @@ inline void FillSamplerDesc(nri::SamplerDesc& nriDesc, const ommGpuStaticSampler
     nriDesc.filters.min = GetNriFilterMode(ommDesc.desc.filter);
     nriDesc.filters.mip = GetNriFilterMode(ommDesc.desc.filter);
     nriDesc.mipMax = 16.0f;
-    nriDesc.compareFunc = nri::CompareFunc::NONE;
+    nriDesc.compareOp = nri::CompareOp::NONE;
 }
 
 void OmmBakerGpuIntegration::CreateSamplers(const ommGpuPipelineInfoDesc* pipelinesInfo) {
@@ -544,7 +542,7 @@ void OmmBakerGpuIntegration::CreateStaticResources(nri::Queue* commandQueue) {
         nri::BufferUploadDesc& uploadDesc = bufferUploadDescs[i];
         uploadDesc.buffer = m_StaticBuffers[i].buffer;
         uploadDesc.data = &uploadData[i][0];
-        uploadDesc.after.access = nri::AccessBits::UNKNOWN;
+        uploadDesc.after.access = nri::AccessBits::NONE;
         uploadDesc.after.stages = nri::StageBits::ALL;
     }
 
@@ -654,9 +652,9 @@ void OmmBakerGpuIntegration::UpdateGlobalConstantBuffer() {
 
     if (m_ConstantBufferSize < newConstantBufferSize) {
         m_ConstantBufferSize = newConstantBufferSize;
-        m_ConstantBufferViewSize = 0;
+        m_ConstantBufferViewStride = 0;
         if (m_ConstantBuffer)
-            NRI.DestroyBuffer(*m_ConstantBuffer);
+            NRI.DestroyBuffer(m_ConstantBuffer);
         nri::BufferDesc bufferDesc = {};
         bufferDesc.size = m_ConstantBufferSize;
         bufferDesc.usage = nri::BufferUsageBits::CONSTANT_BUFFER;
@@ -670,15 +668,24 @@ void OmmBakerGpuIntegration::UpdateGlobalConstantBuffer() {
         NRI_ABORT_ON_FAILURE(NRI.AllocateAndBindMemory(*m_Device, resourceGroupDesc, &m_ConstantBufferHeap));
     }
 
-    if (m_ConstantBufferViewSize < newConstantBufferViewSize) {
-        m_ConstantBufferViewSize = newConstantBufferViewSize;
-        if (m_ConstantBufferView)
-            NRI.DestroyDescriptor(*m_ConstantBufferView);
+    if (m_ConstantBufferViewStride < newConstantBufferViewSize) {
+        m_ConstantBufferViewStride = newConstantBufferViewSize;
+        if (m_ConstantBufferViews.empty() == false){
+            for(auto& view : m_ConstantBufferViews){
+                NRI.DestroyDescriptor(view);
+            }
+        }
+
+        m_ConstantBufferViews.resize((uint32_t)m_GeometryQueue.size());
         nri::BufferViewDesc constantBufferViewDesc = {};
         constantBufferViewDesc.viewType = nri::BufferViewType::CONSTANT;
         constantBufferViewDesc.buffer = m_ConstantBuffer;
-        constantBufferViewDesc.size = m_ConstantBufferViewSize;
-        NRI_ABORT_ON_FAILURE(NRI.CreateBufferView(constantBufferViewDesc, m_ConstantBufferView));
+        constantBufferViewDesc.size = m_ConstantBufferViewStride;
+
+        for(uint64_t i = 0; i < (uint64_t)m_GeometryQueue.size(); ++i) {
+            constantBufferViewDesc.offset = m_ConstantBufferViewStride * i;
+            NRI_ABORT_ON_FAILURE(NRI.CreateBufferView(constantBufferViewDesc, m_ConstantBufferViews[i]));
+        }
     }
 }
 
@@ -694,7 +701,7 @@ inline uint64_t ComputeHash(const void* key, uint32_t len, uint32_t geometryId) 
 void OmmBakerGpuIntegration::UpdateDescriptorPool(uint32_t geometryId, const ommGpuDispatchChain* dispatchChain) {
     nri::DescriptorPool*& desctriptorPool = m_NriDescriptorPools[geometryId];
     if (desctriptorPool)
-        NRI.DestroyDescriptorPool(*desctriptorPool);
+        NRI.DestroyDescriptorPool(desctriptorPool);
 
     nri::DescriptorPoolDesc desc = {};
     uint32_t dispatchNum = 0;
@@ -737,7 +744,7 @@ void OmmBakerGpuIntegration::UpdateDescriptorPool(uint32_t geometryId, const omm
     }
 
     desc.descriptorSetMaxNum = uniqueDescriptorSetNum;
-    desc.dynamicConstantBufferMaxNum = dispatchNum;
+    desc.constantBufferMaxNum = dispatchNum;
     desc.samplerMaxNum = uniqueDescriptorSetNum * (uint32_t)m_Samplers.size();
     NRI_ABORT_ON_FAILURE(NRI.CreateDescriptorPool(*m_Device, desc, desctriptorPool));
 }
@@ -762,7 +769,7 @@ nri::Descriptor* OmmBakerGpuIntegration::GetDescriptor(const ommGpuResource& res
         if (isTexture) {
             nri::Texture2DViewDesc texDesc = {};
             texDesc.mipNum = 1;
-            texDesc.mipOffset = nri::Mip_t(inputs.inTexture.mipOffset);
+            texDesc.mipOffset = nri::Dim_t(inputs.inTexture.mipOffset);
             texDesc.viewType = nri::Texture2DViewType::SHADER_RESOURCE_2D;
             texDesc.format = inputs.inTexture.format;
             texDesc.texture = inputs.inTexture.texture;
@@ -805,54 +812,71 @@ void OmmBakerGpuIntegration::PerformResourceTransition(const ommGpuResource& res
 }
 
 nri::DescriptorSet* OmmBakerGpuIntegration::PrepareDispatch(nri::CommandBuffer& commandBuffer, const ommGpuResource* resources, uint32_t resourceNum, uint32_t pipelineIndex, uint32_t geometryId) {
+    nri::PipelineLayout*& pipelineLayout = m_NriPipelineLayouts[pipelineIndex];
+
+    // Descriptor set
+    uint64_t hash = ComputeHash(resources, resourceNum * sizeof(ommGpuResource), geometryId);
+    const auto& it = m_NriDescriptorSets.find(hash);
+    nri::DescriptorSet* descriptorSet = nullptr;
+    bool updateRanges = false;
+    if (it->second == nullptr) {
+        NRI_ABORT_ON_FAILURE(NRI.AllocateDescriptorSets(*m_NriDescriptorPools[geometryId], *pipelineLayout, 0, &descriptorSet, 1, 0));
+        it->second = descriptorSet;
+        updateRanges = true;
+    } else
+        descriptorSet = it->second;
+
+    // process requested resources. prepare range updates. perform transitions
     std::vector<nri::Descriptor*> descriptors;
     descriptors.resize(resourceNum);
 
-    // process requested resources. prepare range updates. perform transitions
-    std::vector<nri::DescriptorRangeUpdateDesc> rangeUpdateDescs;
+    std::vector<nri::UpdateDescriptorRangeDesc> rangeUpdateDescs;
     std::vector<nri::BufferBarrierDesc> bufferTransitions;
     nri::DescriptorType prevRangeType = nri::DescriptorType::MAX_NUM;
     for (uint32_t i = 0; i < resourceNum; ++i) {
         const ommGpuResource& resource = resources[i];
         nri::DescriptorType rangeType = GetNriDescriptorType(resource.stateNeeded);
         if (rangeType != prevRangeType) {
-            nri::DescriptorRangeUpdateDesc nextRange = {};
+            nri::UpdateDescriptorRangeDesc nextRange = {};
             nextRange.descriptors = descriptors.data() + i;
+            nextRange.rangeIndex = (uint32_t)rangeUpdateDescs.size();
             rangeUpdateDescs.push_back(nextRange);
             prevRangeType = rangeType;
         }
 
-        nri::DescriptorRangeUpdateDesc& currentRange = rangeUpdateDescs.back();
+        nri::UpdateDescriptorRangeDesc& currentRange = rangeUpdateDescs.back();
         descriptors[i] = GetDescriptor(resources[i], geometryId);
         currentRange.descriptorNum += 1;
+        currentRange.descriptorSet = descriptorSet;
         PerformResourceTransition(resource, geometryId, bufferTransitions);
     }
 
-    nri::DescriptorRangeUpdateDesc& staticSamlersRange = rangeUpdateDescs.emplace_back();
+    nri::UpdateDescriptorRangeDesc& staticSamlersRange = rangeUpdateDescs.emplace_back();
     staticSamlersRange.descriptors = m_Samplers.data();
     staticSamlersRange.descriptorNum = (uint32_t)m_Samplers.size();
+    staticSamlersRange.descriptorSet = descriptorSet;
     staticSamlersRange.baseDescriptor = 0;
+    staticSamlersRange.rangeIndex = uint32_t(rangeUpdateDescs.size() - 1);
 
-    nri::BarrierGroupDesc transitionBarriers = {};
+    nri::UpdateDescriptorRangeDesc& constantBufferRange = rangeUpdateDescs.emplace_back();
+    constantBufferRange.descriptors = &m_ConstantBufferViews[geometryId];
+    constantBufferRange.descriptorNum = 1;
+    constantBufferRange.descriptorSet = descriptorSet;
+    constantBufferRange.baseDescriptor = 0;
+    constantBufferRange.rangeIndex = uint32_t(rangeUpdateDescs.size() - 1);
+
+    if (updateRanges) {
+        NRI.UpdateDescriptorRanges(rangeUpdateDescs.data(), (uint32_t) rangeUpdateDescs.size());
+    }
+
+    nri::BarrierDesc transitionBarriers = {};
     transitionBarriers.bufferNum = (uint32_t)bufferTransitions.size();
     transitionBarriers.buffers = bufferTransitions.data();
     if (transitionBarriers.bufferNum)
         NRI.CmdBarrier(commandBuffer, transitionBarriers);
 
-    nri::PipelineLayout*& pipelineLayout = m_NriPipelineLayouts[pipelineIndex];
-    NRI.CmdSetPipelineLayout(commandBuffer, *pipelineLayout);
-
-    // Descriptor set
-    uint64_t hash = ComputeHash(resources, resourceNum * sizeof(ommGpuResource), geometryId);
-    const auto& it = m_NriDescriptorSets.find(hash);
-    nri::DescriptorSet* descriptorSet = nullptr;
-    if (it->second == nullptr) {
-        NRI_ABORT_ON_FAILURE(NRI.AllocateDescriptorSets(*m_NriDescriptorPools[geometryId], *pipelineLayout, 0, &descriptorSet, 1, 0));
-        NRI.UpdateDescriptorRanges(*descriptorSet, 0, (uint32_t)rangeUpdateDescs.size(), rangeUpdateDescs.data());
-        it->second = descriptorSet;
-        NRI.UpdateDynamicConstantBuffers(*descriptorSet, 0, 1, &m_ConstantBufferView);
-    } else
-        descriptorSet = it->second;
+    nri::BindPoint bindPoint = m_PipelineInfo->pipelines[pipelineIndex].type == ommGpuPipelineType::ommGpuPipelineType_Graphics ? nri::BindPoint::GRAPHICS : nri::BindPoint::COMPUTE; 
+    NRI.CmdSetPipelineLayout(commandBuffer, bindPoint, *pipelineLayout);
 
     NRI.CmdSetPipeline(commandBuffer, *m_NriPipelines[pipelineIndex]);
 
@@ -871,7 +895,7 @@ void OmmBakerGpuIntegration::InsertUavBarriers(nri::CommandBuffer& commandBuffer
             uavBarriers.push_back(barrier);
         }
     }
-    nri::BarrierGroupDesc transition = {};
+    nri::BarrierDesc transition = {};
     transition.bufferNum = (uint32_t)uavBarriers.size();
     transition.buffers = uavBarriers.data();
     NRI.CmdBarrier(commandBuffer, transition);
@@ -880,11 +904,23 @@ void OmmBakerGpuIntegration::InsertUavBarriers(nri::CommandBuffer& commandBuffer
 void OmmBakerGpuIntegration::DispatchCompute(nri::CommandBuffer& commandBuffer, const ommGpuComputeDesc& desc, uint32_t geometryId) {
     nri::DescriptorSet* descriptorSet = PrepareDispatch(commandBuffer, desc.resources, desc.resourceNum, desc.pipelineIndex, geometryId);
 
-    if (desc.localConstantBufferDataSize)
-        NRI.CmdSetRootConstants(commandBuffer, 0, desc.localConstantBufferData, desc.localConstantBufferDataSize);
+    if (desc.localConstantBufferDataSize) {
+        nri::SetRootConstantsDesc rootConstantsDesc = {};
+        rootConstantsDesc.rootConstantIndex = 0;
+        rootConstantsDesc.bindPoint = nri::BindPoint::INHERIT;
+        rootConstantsDesc.data = desc.localConstantBufferData;
+        rootConstantsDesc.size = desc.localConstantBufferDataSize;
+        rootConstantsDesc.offset = 0;
+        NRI.CmdSetRootConstants(commandBuffer, rootConstantsDesc);
+    }
 
-    uint32_t constantBufferOffset = m_ConstantBufferOffset;
-    NRI.CmdSetDescriptorSet(commandBuffer, 0, *descriptorSet, &constantBufferOffset);
+    {
+        nri::SetDescriptorSetDesc setDescriptorSetDesc = {};
+        setDescriptorSetDesc.bindPoint = nri::BindPoint::INHERIT;
+        setDescriptorSetDesc.descriptorSet = descriptorSet;
+        setDescriptorSetDesc.setIndex = 0;
+        NRI.CmdSetDescriptorSet(commandBuffer, setDescriptorSetDesc);
+    }
 
     nri::DispatchDesc dispatchDesc = {};
     dispatchDesc.x = desc.gridWidth;
@@ -897,11 +933,22 @@ void OmmBakerGpuIntegration::DispatchCompute(nri::CommandBuffer& commandBuffer, 
 void OmmBakerGpuIntegration::DispatchComputeIndirect(nri::CommandBuffer& commandBuffer, const ommGpuComputeIndirectDesc& desc, uint32_t geometryId) {
     nri::DescriptorSet* descriptorSet = PrepareDispatch(commandBuffer, desc.resources, desc.resourceNum, desc.pipelineIndex, geometryId);
 
-    if (desc.localConstantBufferDataSize)
-        NRI.CmdSetRootConstants(commandBuffer, 0, desc.localConstantBufferData, desc.localConstantBufferDataSize);
+    if (desc.localConstantBufferDataSize){
+        nri::SetRootConstantsDesc rootConstantsDesc = {};
+        rootConstantsDesc.bindPoint = nri::BindPoint::INHERIT;
+        rootConstantsDesc.data = desc.localConstantBufferData;
+        rootConstantsDesc.size = desc.localConstantBufferDataSize;
+        rootConstantsDesc.offset = 0;
+        NRI.CmdSetRootConstants(commandBuffer, rootConstantsDesc);
+    }
 
-    uint32_t constantBufferOffset = m_ConstantBufferOffset;
-    NRI.CmdSetDescriptorSet(commandBuffer, 0, *descriptorSet, &constantBufferOffset);
+    {
+        nri::SetDescriptorSetDesc setDescriptorSetDesc = {};
+        setDescriptorSetDesc.bindPoint = nri::BindPoint::INHERIT;
+        setDescriptorSetDesc.descriptorSet = descriptorSet;
+        setDescriptorSetDesc.setIndex = 0;
+        NRI.CmdSetDescriptorSet(commandBuffer, setDescriptorSetDesc);
+    }
 
     BufferResource& argBuffer = GetBuffer(desc.indirectArg, geometryId);
     if (argBuffer.state != nri::AccessBits::ARGUMENT_BUFFER) {
@@ -912,7 +959,7 @@ void OmmBakerGpuIntegration::DispatchComputeIndirect(nri::CommandBuffer& command
         bufferBarrier.after.access = nri::AccessBits::ARGUMENT_BUFFER;
         bufferBarrier.after.stages = nri::StageBits::ALL;
 
-        nri::BarrierGroupDesc transition = {};
+        nri::BarrierDesc transition = {};
         transition.bufferNum = 1;
         transition.buffers = &bufferBarrier;
         NRI.CmdBarrier(commandBuffer, transition);
@@ -926,11 +973,22 @@ void OmmBakerGpuIntegration::DispatchComputeIndirect(nri::CommandBuffer& command
 void OmmBakerGpuIntegration::DispatchDrawIndexedIndirect(nri::CommandBuffer& commandBuffer, const ommGpuDrawIndexedIndirectDesc& desc, uint32_t geometryId) {
     nri::DescriptorSet* descriptorSet = PrepareDispatch(commandBuffer, desc.resources, desc.resourceNum, desc.pipelineIndex, geometryId);
 
-    if (desc.localConstantBufferDataSize)
-        NRI.CmdSetRootConstants(commandBuffer, 0, desc.localConstantBufferData, desc.localConstantBufferDataSize);
+    if (desc.localConstantBufferDataSize) {
+        nri::SetRootConstantsDesc rootConstantsDesc = {};
+        rootConstantsDesc.bindPoint = nri::BindPoint::INHERIT;
+        rootConstantsDesc.data = desc.localConstantBufferData;
+        rootConstantsDesc.size = desc.localConstantBufferDataSize;
+        rootConstantsDesc.offset = 0;
+        NRI.CmdSetRootConstants(commandBuffer, rootConstantsDesc);
+    }
 
-    uint32_t constantBufferOffset = m_ConstantBufferOffset;
-    NRI.CmdSetDescriptorSet(commandBuffer, 0, *descriptorSet, &constantBufferOffset);
+    {
+        nri::SetDescriptorSetDesc setDescriptorSetDesc = {};
+        setDescriptorSetDesc.bindPoint = nri::BindPoint::INHERIT;
+        setDescriptorSetDesc.descriptorSet = descriptorSet;
+        setDescriptorSetDesc.setIndex = 0;
+        NRI.CmdSetDescriptorSet(commandBuffer, setDescriptorSetDesc);
+    }
 
     BufferResource& argBuffer = GetBuffer(desc.indirectArg, geometryId);
     if (argBuffer.state != nri::AccessBits::ARGUMENT_BUFFER) {
@@ -941,7 +999,7 @@ void OmmBakerGpuIntegration::DispatchDrawIndexedIndirect(nri::CommandBuffer& com
         bufferBarrier.after.access = nri::AccessBits::ARGUMENT_BUFFER;
         bufferBarrier.after.stages = nri::StageBits::ALL;
 
-        nri::BarrierGroupDesc transition = {};
+        nri::BarrierDesc transition = {};
         transition.bufferNum = 1;
         transition.buffers = &bufferBarrier;
         NRI.CmdBarrier(commandBuffer, transition);
@@ -966,7 +1024,7 @@ void OmmBakerGpuIntegration::DispatchDrawIndexedIndirect(nri::CommandBuffer& com
         textureBarrierDesc.after.access = nri::AccessBits::COLOR_ATTACHMENT;
         textureBarrierDesc.after.stages = nri::StageBits::ALL;
 
-        nri::BarrierGroupDesc barrier = {};
+        nri::BarrierDesc barrier = {};
         barrier.textureNum = 1;
         barrier.textures = &textureBarrierDesc;
 
@@ -1034,10 +1092,7 @@ void OmmBakerGpuIntegration::GenerateVisibilityMaskGPU(nri::CommandBuffer& comma
 
     // Upload constants
     if (dispatchChain->globalCBufferDataSize) {
-        if (m_ConstantBufferOffset + m_ConstantBufferViewSize > m_ConstantBufferSize)
-            m_ConstantBufferOffset = 0;
-
-        void* data = NRI.MapBuffer(*m_ConstantBuffer, m_ConstantBufferOffset, dispatchChain->globalCBufferDataSize);
+        void* data = NRI.MapBuffer(*m_ConstantBuffer, m_ConstantBufferViewStride * (uint64_t)geometryId, dispatchChain->globalCBufferDataSize);
         memcpy(data, dispatchChain->globalCBufferData, dispatchChain->globalCBufferDataSize);
         NRI.UnmapBuffer(*m_ConstantBuffer);
     }
@@ -1070,7 +1125,6 @@ void OmmBakerGpuIntegration::GenerateVisibilityMaskGPU(nri::CommandBuffer& comma
                 break;
         }
     }
-    m_ConstantBufferOffset += m_ConstantBufferViewSize;
 
     BakerOutputs& outputs = instance.desc->outputs;
     BakerInputs& inputs = instance.desc->inputs;
@@ -1085,7 +1139,7 @@ void OmmBakerGpuIntegration::GenerateVisibilityMaskGPU(nri::CommandBuffer& comma
     for (size_t i = 0; i < OMM_MAX_TRANSIENT_POOL_BUFFERS; ++i)
         PostBakeBufferTransition(outputBuffersTransition, inputs.inTransientPool[i]);
 
-    nri::BarrierGroupDesc transitionBarriers = {};
+    nri::BarrierDesc transitionBarriers = {};
     transitionBarriers.bufferNum = (uint32_t)outputBuffersTransition.size();
     transitionBarriers.buffers = outputBuffersTransition.data();
 
@@ -1114,13 +1168,13 @@ void OmmBakerGpuIntegration::ReleaseTemporalResources() {
 
     for (auto it = m_NriDescriptors.begin(); it != m_NriDescriptors.end();) {
         if (it->second)
-            NRI.DestroyDescriptor(*it->second);
+            NRI.DestroyDescriptor(it->second);
         it = m_NriDescriptors.erase(it);
     }
 
     for (auto& pool : m_NriDescriptorPools) {
         if (pool) {
-            NRI.DestroyDescriptorPool(*pool);
+            NRI.DestroyDescriptorPool(pool);
             pool = nullptr;
         }
     }
@@ -1128,28 +1182,29 @@ void OmmBakerGpuIntegration::ReleaseTemporalResources() {
     m_NriDescriptorPools.shrink_to_fit();
 
     if (m_ConstantBuffer)
-        NRI.DestroyBuffer(*m_ConstantBuffer);
-    if (m_ConstantBufferView)
-        NRI.DestroyDescriptor(*m_ConstantBufferView);
+        NRI.DestroyBuffer(m_ConstantBuffer);
+    for(auto& view : m_ConstantBufferViews)
+        NRI.DestroyDescriptor(view);
     if (m_ConstantBufferHeap)
-        NRI.FreeMemory(*m_ConstantBufferHeap);
-    m_ConstantBufferViewSize = m_ConstantBufferSize = m_ConstantBufferOffset = 0;
+        NRI.FreeMemory(m_ConstantBufferHeap);
+    m_ConstantBufferViewStride = m_ConstantBufferSize = 0;
     m_ConstantBuffer = nullptr;
-    m_ConstantBufferView = nullptr;
     m_ConstantBufferHeap = nullptr;
+    m_ConstantBufferViews.resize(0);
+    m_ConstantBufferViews.shrink_to_fit();
 }
 
 void OmmBakerGpuIntegration::Destroy() {
     if (m_DebugTextureDescriptor) {
-        NRI.DestroyDescriptor(*m_DebugTextureDescriptor);
+        NRI.DestroyDescriptor(m_DebugTextureDescriptor);
         m_DebugTextureDescriptor = nullptr;
     }
     if (m_DebugTexture) {
-        NRI.DestroyTexture(*m_DebugTexture);
+        NRI.DestroyTexture(m_DebugTexture);
         m_DebugTexture = nullptr;
     }
     if (m_DebugTextureMemory) {
-        NRI.FreeMemory(*m_DebugTextureMemory);
+        NRI.FreeMemory(m_DebugTextureMemory);
         m_DebugTextureMemory = nullptr;
     }
     m_ColorDescriptorPerPipeline.resize(0);
@@ -1157,24 +1212,24 @@ void OmmBakerGpuIntegration::Destroy() {
 
     for (auto& sampler : m_Samplers)
         if (sampler)
-            NRI.DestroyDescriptor(*sampler);
+            NRI.DestroyDescriptor(sampler);
 
     for (auto& pipeline : m_NriPipelines)
         if (pipeline)
-            NRI.DestroyPipeline(*pipeline);
+            NRI.DestroyPipeline(pipeline);
 
     for (auto& layout : m_NriPipelineLayouts)
         if (layout)
-            NRI.DestroyPipelineLayout(*layout);
+            NRI.DestroyPipelineLayout(layout);
 
     for (uint32_t i = 0; i < (uint32_t)GpuStaticResources::Count; ++i) {
         if (m_StaticBuffers[i].buffer)
-            NRI.DestroyBuffer(*m_StaticBuffers[i].buffer);
+            NRI.DestroyBuffer(m_StaticBuffers[i].buffer);
     }
 
     for (auto& memory : m_NriStaticMemories)
         if (memory)
-            NRI.FreeMemory(*memory);
+            NRI.FreeMemory(memory);
 
     ommGpuDestroyPipeline(m_GpuBaker, m_Pipeline);
     ommDestroyBaker(m_GpuBaker);

@@ -223,11 +223,11 @@ void OpacityMicroMapsHelper::ConvertUsageCountsToApiFormat(uint8_t* outFormatted
 
 void OpacityMicroMapsHelper::DestroyMaskedGeometry(nri::AccelerationStructure* blas, nri::Buffer* ommArray) {
     if (blas)
-        NRI.DestroyAccelerationStructure(*blas);
+        NRI.DestroyAccelerationStructure(blas);
 
     if (NRI.GetDeviceDesc(*m_Device).graphicsAPI == nri::GraphicsAPI::D3D12) {
         if (ommArray)
-            NRI.DestroyBuffer(*ommArray);
+            NRI.DestroyBuffer(ommArray);
     } else
         DestroyOmmArrayVK(ommArray);
 }
@@ -386,7 +386,7 @@ inline void FillGpuBakerResourceBufferDesc(BufferResource& bakerDesc, const GpuB
     bakerDesc.buffer = inDesc.buffer;
     bakerDesc.offset = inDesc.offset;
     bakerDesc.size = inDesc.bufferSize;
-    bakerDesc.state = nri::AccessBits::UNKNOWN;
+    bakerDesc.state = nri::AccessBits::NONE;
 }
 
 inline void FillInputGeometryDesc(const OmmBakeGeometryDesc& desc, InputGeometryDesc& geometryDesc, const OmmBakeDesc& bakeDesc, OmmGpuBakerPass pass) {

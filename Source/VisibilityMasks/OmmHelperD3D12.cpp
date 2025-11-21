@@ -10,11 +10,9 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 #include "OmmHelper.h"
 
-#define D3D12_RAYTRACING_OPACITY_MICROMAP_ARRAY_BYTE_ALIGNMENT (128) // missing from d3d12.h at this moment. TODO: remove when fixed
-
 namespace ommhelper {
 inline ID3D12Device5* OpacityMicroMapsHelper::GetD3D12Device5() {
-    ID3D12Device* d3d12Device = (ID3D12Device*)NRI.GetDeviceNativeObject(*m_Device);
+    ID3D12Device* d3d12Device = (ID3D12Device*)NRI.GetDeviceNativeObject(m_Device);
     if (!d3d12Device) {
         printf("[FAILED] ID3D12Device* d3d12Device = NRI.GetDeviceNativeObject(*m_Device)");
         std::abort();
@@ -30,7 +28,7 @@ inline ID3D12Device5* OpacityMicroMapsHelper::GetD3D12Device5() {
 inline ID3D12GraphicsCommandList4* OpacityMicroMapsHelper::GetD3D12GraphicsCommandList4(nri::CommandBuffer* commandBuffer) {
     ID3D12GraphicsCommandList4* commandList = nullptr;
     {
-        ID3D12GraphicsCommandList* graphicsCommandList = (ID3D12GraphicsCommandList*)NRI.GetCommandBufferNativeObject(*commandBuffer);
+        ID3D12GraphicsCommandList* graphicsCommandList = (ID3D12GraphicsCommandList*)NRI.GetCommandBufferNativeObject(commandBuffer);
         if (graphicsCommandList->QueryInterface(IID_PPV_ARGS(&commandList)) != S_OK) {
             printf("[FAIL]: ID3D12GraphicsCommandList::QueryInterface(ID3D12GraphicsCommandList4)\n");
             std::abort();
@@ -264,7 +262,7 @@ void OpacityMicroMapsHelper::BindResourceToMemoryD3D12(ID3D12Resource*& resource
     D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE;
 #else
     D3D12_RESOURCE_FLAGS resourceFlags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-    D3D12_RESOURCE_STATES intianlState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 #endif
 
     D3D12_RESOURCE_DESC resourceDesc = InitBufferResourceDesc(size, resourceFlags);
@@ -309,7 +307,7 @@ void OpacityMicroMapsHelper::GetPreBuildInfoD3D12(MaskedGeometryBuildDesc** queu
 
         { // get blas prebuild info
             nri::Buffer* nriOmmIndexData = desc.inputs.buffers[(uint32_t)OmmDataLayout::Indices].buffer;
-            ID3D12Resource* ommIndexData = nriOmmIndexData ? (ID3D12Resource*)NRI.GetBufferNativeObject(*nriOmmIndexData) : nullptr;
+            ID3D12Resource* ommIndexData = nriOmmIndexData ? (ID3D12Resource*)NRI.GetBufferNativeObject(nriOmmIndexData) : nullptr;
             D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO blasPrebuildInfo = {};
 #if DXR_OMM
             {
@@ -355,8 +353,8 @@ void OpacityMicroMapsHelper::BuildOmmArrayD3D12(MaskedGeometryBuildDesc& desc, n
     if (!desc.inputs.buffers[(uint32_t)OmmDataLayout::ArrayData].buffer)
         return;
 
-    ID3D12Resource* ommArrayData = (ID3D12Resource*)NRI.GetBufferNativeObject(*desc.inputs.buffers[(uint32_t)OmmDataLayout::ArrayData].buffer);
-    ID3D12Resource* ommDescArray = (ID3D12Resource*)NRI.GetBufferNativeObject(*desc.inputs.buffers[(uint32_t)OmmDataLayout::DescArray].buffer);
+    ID3D12Resource* ommArrayData = (ID3D12Resource*)NRI.GetBufferNativeObject(desc.inputs.buffers[(uint32_t)OmmDataLayout::ArrayData].buffer);
+    ID3D12Resource* ommDescArray = (ID3D12Resource*)NRI.GetBufferNativeObject(desc.inputs.buffers[(uint32_t)OmmDataLayout::DescArray].buffer);
 
     ID3D12Resource* ommArrayBuffer = nullptr;
     BindResourceToMemoryD3D12(ommArrayBuffer, desc.prebuildInfo.ommArraySize);
@@ -410,10 +408,10 @@ void OpacityMicroMapsHelper::BuildBlasD3D12(MaskedGeometryBuildDesc& desc, nri::
     if (!desc.outputs.ommArray)
         return;
 
-    ID3D12Resource* indexData = (ID3D12Resource*)NRI.GetBufferNativeObject(*desc.inputs.indices.nriBufferOrPtr.buffer);
-    ID3D12Resource* vertexData = (ID3D12Resource*)NRI.GetBufferNativeObject(*desc.inputs.vertices.nriBufferOrPtr.buffer);
-    ID3D12Resource* ommArray = (ID3D12Resource*)NRI.GetBufferNativeObject(*desc.outputs.ommArray);
-    ID3D12Resource* ommIndexData = (ID3D12Resource*)NRI.GetBufferNativeObject(*desc.inputs.buffers[(uint32_t)OmmDataLayout::Indices].buffer);
+    ID3D12Resource* indexData = (ID3D12Resource*)NRI.GetBufferNativeObject(desc.inputs.indices.nriBufferOrPtr.buffer);
+    ID3D12Resource* vertexData = (ID3D12Resource*)NRI.GetBufferNativeObject(desc.inputs.vertices.nriBufferOrPtr.buffer);
+    ID3D12Resource* ommArray = (ID3D12Resource*)NRI.GetBufferNativeObject(desc.outputs.ommArray);
+    ID3D12Resource* ommIndexData = (ID3D12Resource*)NRI.GetBufferNativeObject(desc.inputs.buffers[(uint32_t)OmmDataLayout::Indices].buffer);
 
     ID3D12Resource* blas = nullptr;
     BindResourceToMemoryD3D12(blas, desc.prebuildInfo.blasSize);

@@ -52,7 +52,7 @@ struct VkInterface {
 } VK = {};
 
 inline VkDevice OpacityMicroMapsHelper::GetVkDevice() {
-    return (VkDevice)NRI.GetDeviceNativeObject(*m_Device);
+    return (VkDevice)NRI.GetDeviceNativeObject(m_Device);
 }
 
 inline VkIndexType GetVkIndexType(nri::Format format) {
@@ -75,7 +75,7 @@ inline VkBufferDeviceAddressInfo GetBufferAddressInfo(VkBuffer& buffer) {
 
 void OpacityMicroMapsHelper::InitializeVK() {
     VkInstance vkInstance = (VkInstance)NRI.GetInstanceVK(*m_Device);
-    VkDevice vkDevice = (VkDevice)NRI.GetDeviceNativeObject(*m_Device);
+    VkDevice vkDevice = (VkDevice)NRI.GetDeviceNativeObject(m_Device);
 
     { // Get required vk function pointers
         PFN_vkGetDeviceProcAddr getDeviceProcAddr = (PFN_vkGetDeviceProcAddr)NRI.GetDeviceProcAddrVK(*m_Device);
@@ -317,14 +317,14 @@ void OpacityMicroMapsHelper::GetPreBuildInfoVK(MaskedGeometryBuildDesc** queue, 
 
             VkDeviceAddress ommIndicesAddress = NULL;
             if (nriOmmIndices) {
-                VkBuffer ommIndices = nriOmmIndices ? (VkBuffer)NRI.GetBufferNativeObject(*nriOmmIndices) : NULL;
+                VkBuffer ommIndices = nriOmmIndices ? (VkBuffer)NRI.GetBufferNativeObject(nriOmmIndices) : NULL;
                 VkBufferDeviceAddressInfo ommIndicesbufferAddressInfo = GetBufferAddressInfo(ommIndices);
                 ommIndicesAddress = ommIndices ? VK.GetBufferDeviceAddress(GetVkDevice(), &ommIndicesbufferAddressInfo) : NULL;
                 ommIndicesAddress += buffers[(uint32_t)OmmDataLayout::Indices].offset;
             }
 
-            VkBuffer indices = (VkBuffer)NRI.GetBufferNativeObject(*inputs.indices.nriBufferOrPtr.buffer);
-            VkBuffer vertices = (VkBuffer)NRI.GetBufferNativeObject(*inputs.vertices.nriBufferOrPtr.buffer);
+            VkBuffer indices = (VkBuffer)NRI.GetBufferNativeObject(inputs.indices.nriBufferOrPtr.buffer);
+            VkBuffer vertices = (VkBuffer)NRI.GetBufferNativeObject(inputs.vertices.nriBufferOrPtr.buffer);
 
             VkBufferDeviceAddressInfo indicesBufferAddressInfo = GetBufferAddressInfo(indices);
             VkBufferDeviceAddressInfo verticesBufferAddressInfo = GetBufferAddressInfo(vertices);
@@ -404,8 +404,8 @@ void OpacityMicroMapsHelper::BuildOmmArrayVK(MaskedGeometryBuildDesc& desc, nri:
     const MaskedGeometryBuildDesc::Inputs& inputs = desc.inputs;
     const GpuBakerBuffer* buffers = inputs.buffers;
 
-    VkBuffer ommArrayData = (VkBuffer)NRI.GetBufferNativeObject(*buffers[(uint32_t)OmmDataLayout::ArrayData].buffer);
-    VkBuffer ommDescArray = (VkBuffer)NRI.GetBufferNativeObject(*buffers[(uint32_t)OmmDataLayout::DescArray].buffer);
+    VkBuffer ommArrayData = (VkBuffer)NRI.GetBufferNativeObject(buffers[(uint32_t)OmmDataLayout::ArrayData].buffer);
+    VkBuffer ommDescArray = (VkBuffer)NRI.GetBufferNativeObject(buffers[(uint32_t)OmmDataLayout::DescArray].buffer);
 
     uint64_t ommArrayDataOffset = buffers[(uint32_t)OmmDataLayout::ArrayData].offset;
     uint64_t ommDescArrayOffset = buffers[(uint32_t)OmmDataLayout::DescArray].offset;
@@ -420,7 +420,7 @@ void OpacityMicroMapsHelper::BuildOmmArrayVK(MaskedGeometryBuildDesc& desc, nri:
 
     VkMicromapBuildInfoEXT buildDesc = FillMicromapBuildInfo(inputs, ommArray, ommArrayDataAddress, ommDescArrayAddress, scratchAddress);
 
-    VkCommandBuffer vkCommandBuffer = (VkCommandBuffer)NRI.GetCommandBufferNativeObject(*commandBuffer);
+    VkCommandBuffer vkCommandBuffer = (VkCommandBuffer)NRI.GetCommandBufferNativeObject(commandBuffer);
     VK.CmdBuildMicromapsEXT(vkCommandBuffer, 1, &buildDesc);
     InsertUavBarrier(vkCommandBuffer, m_VkScrathBuffer, m_SctrachSize, 0);
 
@@ -452,13 +452,13 @@ void OpacityMicroMapsHelper::BuildBlasVK(MaskedGeometryBuildDesc& desc, nri::Com
     const GpuBakerBuffer* buffers = inputs.buffers;
 
     nri::Buffer* nriOmmIndices = buffers[(uint32_t)OmmDataLayout::Indices].buffer;
-    VkBuffer ommIndices = (VkBuffer)NRI.GetBufferNativeObject(*nriOmmIndices);
+    VkBuffer ommIndices = (VkBuffer)NRI.GetBufferNativeObject(nriOmmIndices);
     VkBufferDeviceAddressInfo ommIndicesAddressInfo = GetBufferAddressInfo(ommIndices);
     VkDeviceAddress ommIndicesAddress = VK.GetBufferDeviceAddress(GetVkDevice(), &ommIndicesAddressInfo);
     ommIndicesAddress += buffers[(uint32_t)OmmDataLayout::Indices].offset;
 
-    VkBuffer indices = (VkBuffer)NRI.GetBufferNativeObject(*inputs.indices.nriBufferOrPtr.buffer);
-    VkBuffer vertices = (VkBuffer)NRI.GetBufferNativeObject(*inputs.vertices.nriBufferOrPtr.buffer);
+    VkBuffer indices = (VkBuffer)NRI.GetBufferNativeObject(inputs.indices.nriBufferOrPtr.buffer);
+    VkBuffer vertices = (VkBuffer)NRI.GetBufferNativeObject(inputs.vertices.nriBufferOrPtr.buffer);
 
     VkBufferDeviceAddressInfo indicesAddressInfo = GetBufferAddressInfo(indices);
     VkBufferDeviceAddressInfo verticesAddressInfo = GetBufferAddressInfo(vertices);
@@ -479,7 +479,7 @@ void OpacityMicroMapsHelper::BuildBlasVK(MaskedGeometryBuildDesc& desc, nri::Com
     range.primitiveCount = uint32_t(inputs.indices.numElements / 3);
     const VkAccelerationStructureBuildRangeInfoKHR* rangeArrays[1] = {&range};
 
-    VkCommandBuffer vkCommandBuffer = (VkCommandBuffer)NRI.GetCommandBufferNativeObject(*commandBuffer);
+    VkCommandBuffer vkCommandBuffer = (VkCommandBuffer)NRI.GetCommandBufferNativeObject(commandBuffer);
     VK.CmdBuildAccelerationStructuresKHR(vkCommandBuffer, 1, &blasDesc, rangeArrays); // Known issue: Vulkan Debug Layer crashes here
     InsertUavBarrier(vkCommandBuffer, m_VkScrathBuffer, m_SctrachSize, 0);
 

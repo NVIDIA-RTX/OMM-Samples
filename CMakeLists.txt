@@ -1,11 +1,28 @@
 cmake_minimum_required(VERSION 3.30)
 
 include(FetchContent)
+include(CMakeDependentOption)
 
+# Architecture
+if((CMAKE_GENERATOR_PLATFORM MATCHES "ARM64") OR (CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64"))
+    set(IS_ARM64 TRUE)
+else()
+    set(IS_ARM64 FALSE)
+endif()
+
+# GitHub actions?
+if("$ENV{GITHUB_ACTIONS}" STREQUAL "")
+    set(GITHUB_CI FALSE CACHE BOOL "GitHub Actions runner" FORCE)
+else()
+    set(GITHUB_CI TRUE CACHE BOOL "GitHub Actions runner" FORCE)
+    message(STATUS "Detected environment: GitHub Actions...")
+endif()
+
+# Options
 option(DXR_OMM "Use DXR 1.2 API" ON)
 
-# Cached
-option(USE_MINIMAL_DATA "Use minimal '_Data' (90MB)" OFF)
+cmake_dependent_option(USE_MINIMAL_DATA "Use minimal '_Data' (90MB)" ON "GITHUB_CI" OFF)
+cmake_dependent_option(RTXCR_INTEGRATION "Use RTXCR for hair and skin rendering, download sample scene" ON "NOT GITHUB_CI" OFF)
 
 set(SHADER_OUTPUT_PATH "${CMAKE_CURRENT_SOURCE_DIR}/_Shaders" CACHE STRING "")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/_Bin" CACHE STRING "")
@@ -33,13 +50,13 @@ else()
     set(PACKMAN_EXT ".sh")
 endif()
 
-if((CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64") OR(CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64"))
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
     if(WIN32)
         set(PACKMAN_PLATFORM "windows-x86_64")
     else()
         set(PACKMAN_PLATFORM "linux-x86_64")
     endif()
-elseif((CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64") OR(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64"))
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
     set(PACKMAN_PLATFORM "linux-aarch64")
 else()
     message(FATAL_ERROR "Unsupported architecture: '${CMAKE_SYSTEM_PROCESSOR}'")
@@ -66,14 +83,47 @@ endif()
 # Download dependencies
 set(DEPS)
 
+if(NOT TARGET ShaderMake)
+    # ShaderMake
+    option(SHADERMAKE_TOOL "" OFF)
+
+    FetchContent_Declare(
+        shadermake
+        GIT_REPOSITORY https://github.com/NVIDIA-RTX/ShaderMake.git
+        GIT_TAG main
+        GIT_SHALLOW 1
+    )
+    list(APPEND DEPS shadermake)
+endif()
+
 # SHARC
 FetchContent_Declare(
     sharc
     GIT_REPOSITORY https://github.com/NVIDIA-RTX/SHARC.git
-    GIT_TAG main
+    GIT_TAG v1.6.0.0
     GIT_SHALLOW 1
 )
 list(APPEND DEPS sharc)
+
+# RTXCR
+if(RTXCR_INTEGRATION)
+    FetchContent_Declare(
+        rtxcr
+        GIT_REPOSITORY https://github.com/NVIDIA-RTX/RTXCR-Material-Library.git
+        GIT_TAG v1.1.0
+        GIT_SHALLOW 1
+    )
+    list(APPEND DEPS rtxcr)
+
+    FetchContent_Declare(
+        claire
+        GIT_REPOSITORY https://github.com/NVIDIA-RTX/RTXCR-Assets.git
+        GIT_TAG v1.1.0
+        GIT_SHALLOW 1
+        SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/_Data/Scenes/Claire"
+    )
+    list(APPEND DEPS claire)
+endif()
 
 if(DEPS)
     message("Downloading dependencies:")
@@ -83,7 +133,7 @@ if(DEPS)
 endif()
 
 # Compile options
-if(NOT((CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64") OR(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")))
+if(NOT IS_ARM64)
     set(SIMD -mssse3)
 endif()
 
@@ -106,23 +156,27 @@ if(WIN32)
 endif()
 
 # External/NRIFramework
-option(SHADERMAKE_TOOL "" OFF)
-set(NRIF_SHADERS_PATH "${SHADER_OUTPUT_PATH}" CACHE STRING "")
 set(NRI_SHADERS_PATH "${SHADER_OUTPUT_PATH}" CACHE STRING "")
-
 option(NRI_ENABLE_NONE_SUPPORT "" OFF)
 option(NRI_ENABLE_D3D11_SUPPORT "" OFF)
 option(NRI_ENABLE_NIS_SDK "" ON)
+if(NOT IS_ARM64)
 option(NRI_ENABLE_NGX_SDK "" ON)
 option(NRI_ENABLE_FFX_SDK "" ON)
 option(NRI_ENABLE_XESS_SDK "" ON)
+endif()
+
 add_subdirectory("External/NRIFramework")
 
 # External/NRD
 set(NRD_SHADERS_PATH "${SHADER_OUTPUT_PATH}" CACHE STRING "")
 set(NRD_NORMAL_ENCODING "2" CACHE STRING "")
 set(NRD_ROUGHNESS_ENCODING "1" CACHE STRING "")
-set(NRD_EMBEDS_DXBC_SHADERS "0" CACHE STRING "")
+option(NRD_SUPPORTS_CHECKERBOARD "" OFF)
+option(NRD_SUPPORTS_HISTORY_CONFIDENCE "" OFF)
+option(NRD_SUPPORTS_DISOCCLUSION_THRESHOLD_MIX "" OFF)
+option(NRD_SUPPORTS_BASECOLOR_METALNESS "" OFF)
+
 add_subdirectory("External/NRD")
 
 # Opacity Micro-Maps
@@ -130,8 +184,6 @@ set(OMM_VK_S_SHIFT 0 CACHE STRING "OMM_VK_S_SHIFT")
 set(OMM_VK_T_SHIFT 128 CACHE STRING "OMM_VK_T_SHIFT")
 set(OMM_VK_B_SHIFT 32 CACHE STRING "OMM_VK_B_SHIFT")
 set(OMM_VK_U_SHIFT 64 CACHE STRING "OMM_VK_U_SHIFT")
-set(DXC_PATH ${SHADERMAKE_DXC_PATH})
-set(DXC_SPIRV_PATH ${SHADERMAKE_DXC_VK_PATH})
 set(OMM_PROJECT_FOLDER "Opacity Micro-Map SDK")
 set(OMM_ENABLE_TESTS OFF CACHE BOOL "")
 set(OMM_BUILD_VIEWER OFF CACHE BOOL "")
@@ -146,7 +198,7 @@ function(fix_folders _DIRECTORY _FOLDER)
 
     foreach(_TARGET IN LISTS _TARGETS)
         get_property(_FOLDER_ORIGINAL TARGET ${_TARGET} PROPERTY FOLDER)
-        set_property(TARGET ${_TARGET} PROPERTY FOLDER "${_FOLDER}/${_FOLDER_ORIGINAL}")
+        set_target_properties(${_TARGET} PROPERTIES FOLDER "${_FOLDER}/${_FOLDER_ORIGINAL}")
     endforeach()
 
     get_property(SUBDIRS DIRECTORY "${_DIRECTORY}" PROPERTY SUBDIRECTORIES)
@@ -160,7 +212,7 @@ fix_folders("External/NRIFramework" "External")
 fix_folders("External/NRD" "External")
 
 # Get source directories for 3rd parties
-get_target_property(ML_SOURCE_DIR MathLib INTERFACE_INCLUDE_DIRECTORIES)
+get_target_property(ML_SOURCE_DIR MathLib SOURCE_DIR)
 get_target_property(NRI_SOURCE_DIR NRI SOURCE_DIR)
 get_target_property(NRD_SOURCE_DIR NRD SOURCE_DIR)
 
@@ -227,8 +279,6 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     ${COMPILE_DEFINITIONS}
     PROJECT_NAME=${PROJECT_NAME}
-    NRD_NORMAL_ENCODING=${NRD_NORMAL_ENCODING}
-    NRD_ROUGHNESS_ENCODING=${NRD_ROUGHNESS_ENCODING}
     SHADERMAKE_PATH=${SHADERMAKE_PATH}
     SHADERMAKE_DXC_PATH=${SHADERMAKE_DXC_PATH}
     SHADERMAKE_DXC_VK_PATH=${SHADERMAKE_DXC_VK_PATH}
@@ -236,6 +286,8 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     NRI_SOURCE_DIR=${NRI_SOURCE_DIR}/Include
     NRD_SOURCE_DIR=${NRD_SOURCE_DIR}/Shaders/Include
     SHARC_SOURCE_DIR=${sharc_SOURCE_DIR}/include
+    RTXCR_SOURCE_DIR=${rtxcr_SOURCE_DIR}/shaders/include/rtxcr
+    RTXCR_INTEGRATION=$<BOOL:${RTXCR_INTEGRATION}>
 )
 target_compile_options(${PROJECT_NAME} PRIVATE ${COMPILE_OPTIONS})
 
@@ -250,8 +302,10 @@ if(UNIX)
     target_link_libraries(${PROJECT_NAME} PRIVATE ${CMAKE_DL_LIBS} pthread X11)
 endif()
 
-set_property(TARGET ${PROJECT_NAME} PROPERTY FOLDER "Sample")
-set_property(TARGET ${PROJECT_NAME} PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_target_properties(${PROJECT_NAME} PROPERTIES
+    FOLDER "Sample"
+    VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+)
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ${PROJECT_NAME})
 
 # Copy arguments for Visual Studio Smart Command Line Arguments extension
@@ -285,19 +339,20 @@ set(SHADERMAKE_GENERAL_ARGS
     -I "${NRD_SOURCE_DIR}/Shaders/Include"
     -I "${NRI_SOURCE_DIR}/Include"
     -I "${sharc_SOURCE_DIR}/include"
-    -D NRD_NORMAL_ENCODING=${NRD_NORMAL_ENCODING}
-    -D NRD_ROUGHNESS_ENCODING=${NRD_ROUGHNESS_ENCODING}
+    -I "${rtxcr_SOURCE_DIR}/shaders/include/rtxcr"
+    -D RTXCR_INTEGRATION=$<BOOL:${RTXCR_INTEGRATION}>
+    --relaxedInclude "HairFarFieldBCSDF.hlsli"
+    --relaxedInclude "SubsurfaceScattering.hlsli"
 )
 
-set(SHADERMAKE_COMMANDS "")
-
+set(SHADERMAKE_COMMANDS)
 if(NRI_ENABLE_D3D12_SUPPORT)
-    set(SHADERMAKE_COMMANDS ${SHADERMAKE_COMMANDS} COMMAND ${SHADERMAKE_PATH} -p DXIL --compiler "${SHADERMAKE_DXC_PATH}" ${SHADERMAKE_GENERAL_ARGS})
+    list(APPEND SHADERMAKE_COMMANDS COMMAND ${SHADERMAKE_PATH} -p DXIL --compiler "${SHADERMAKE_DXC_PATH}" ${SHADERMAKE_GENERAL_ARGS})
 endif()
-
 if(NRI_ENABLE_VK_SUPPORT)
-    set(SHADERMAKE_COMMANDS ${SHADERMAKE_COMMANDS} COMMAND ${SHADERMAKE_PATH} -p SPIRV --compiler "${SHADERMAKE_DXC_VK_PATH}" ${SHADERMAKE_GENERAL_ARGS})
+    list(APPEND SHADERMAKE_COMMANDS COMMAND ${SHADERMAKE_PATH} -p SPIRV --compiler "${SHADERMAKE_DXC_VK_PATH}" ${SHADERMAKE_GENERAL_ARGS})
 endif()
+list(APPEND SHADERMAKE_COMMANDS "") # fix for "The system cannot find the batch label specified - VCEnd"
 
 add_custom_target(${PROJECT_NAME}Shaders ALL
     ${SHADERMAKE_COMMANDS}
@@ -308,9 +363,10 @@ add_custom_target(${PROJECT_NAME}Shaders ALL
 )
 
 # Opacity Micro-Map integration files
+
 if (TARGET omm-lib)
     file(GLOB VM_INTEGRATION_FILES "Source/VisibilityMasks/*.h" "Source/VisibilityMasks/*.cpp")
-    source_group("VM Helper" FILES ${VM_INTEGRATION_FILES})
+    source_group("Omm Helper" FILES ${VM_INTEGRATION_FILES})
     target_sources(${PROJECT_NAME}  PRIVATE ${VM_INTEGRATION_FILES})
 
     file(GLOB PROFILER_FILES "Source/Profiler/*.hpp")
@@ -318,5 +374,5 @@ if (TARGET omm-lib)
     target_sources(${PROJECT_NAME}  PRIVATE ${PROFILER_FILES})
 endif()
 
-set_property(TARGET ${PROJECT_NAME}Shaders PROPERTY FOLDER "Sample")
+set_target_properties(${PROJECT_NAME}Shaders PROPERTIES FOLDER "Sample")
 add_dependencies(${PROJECT_NAME} ${PROJECT_NAME}Shaders)

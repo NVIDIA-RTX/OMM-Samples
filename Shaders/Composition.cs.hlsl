@@ -1,29 +1,25 @@
 // © 2022 NVIDIA Corporation
 
 #include "Include/Shared.hlsli"
-#include "Include/RaytracingShared.hlsli"
-
-#define SHARC_QUERY 1
-#include "SharcCommon.h"
 
 // Inputs
-NRI_RESOURCE( Texture2D<float>, gIn_ViewZ, t, 0, 1 );
-NRI_RESOURCE( Texture2D<float4>, gIn_Normal_Roughness, t, 1, 1 );
-NRI_RESOURCE( Texture2D<float4>, gIn_BaseColor_Metalness, t, 2, 1 );
-NRI_RESOURCE( Texture2D<float3>, gIn_DirectLighting, t, 3, 1 );
-NRI_RESOURCE( Texture2D<float3>, gIn_DirectEmission, t, 4, 1 );
-NRI_RESOURCE( Texture2D<float3>, gIn_PsrThroughput, t, 5, 1 );
-NRI_RESOURCE( Texture2D<float4>, gIn_Shadow, t, 6, 1 );
-NRI_RESOURCE( Texture2D<float4>, gIn_Diff, t, 7, 1 );
-NRI_RESOURCE( Texture2D<float4>, gIn_Spec, t, 8, 1 );
+NRI_RESOURCE( Texture2D<float>, gIn_ViewZ, t, 0, SET_OTHER );
+NRI_RESOURCE( Texture2D<float4>, gIn_Normal_Roughness, t, 1, SET_OTHER );
+NRI_RESOURCE( Texture2D<float4>, gIn_BaseColor_Metalness, t, 2, SET_OTHER );
+NRI_RESOURCE( Texture2D<float3>, gIn_DirectLighting, t, 3, SET_OTHER );
+NRI_RESOURCE( Texture2D<float3>, gIn_DirectEmission, t, 4, SET_OTHER );
+NRI_RESOURCE( Texture2D<float3>, gIn_PsrThroughput, t, 5, SET_OTHER );
+NRI_RESOURCE( Texture2D<float4>, gIn_Shadow, t, 6, SET_OTHER );
+NRI_RESOURCE( Texture2D<float4>, gIn_Diff, t, 7, SET_OTHER );
+NRI_RESOURCE( Texture2D<float4>, gIn_Spec, t, 8, SET_OTHER );
 #if( NRD_MODE == SH )
-    NRI_RESOURCE( Texture2D<float4>, gIn_DiffSh, t, 9, 1 );
-    NRI_RESOURCE( Texture2D<float4>, gIn_SpecSh, t, 10, 1 );
+    NRI_RESOURCE( Texture2D<float4>, gIn_DiffSh, t, 9, SET_OTHER );
+    NRI_RESOURCE( Texture2D<float4>, gIn_SpecSh, t, 10, SET_OTHER );
 #endif
 
 // Outputs
-NRI_FORMAT("unknown") NRI_RESOURCE( RWTexture2D<float3>, gOut_ComposedDiff, u, 0, 1 );
-NRI_FORMAT("unknown") NRI_RESOURCE( RWTexture2D<float4>, gOut_ComposedSpec_ViewZ, u, 1, 1 );
+NRI_FORMAT("unknown") NRI_RESOURCE( RWTexture2D<float3>, gOut_ComposedDiff, u, 0, SET_OTHER );
+NRI_FORMAT("unknown") NRI_RESOURCE( RWTexture2D<float4>, gOut_ComposedSpec_ViewZ, u, 1, SET_OTHER );
 
 [numthreads( 16, 16, 1 )]
 void main( int2 pixelPos : SV_DispatchThreadId )
@@ -52,7 +48,7 @@ void main( int2 pixelPos : SV_DispatchThreadId )
     // Early out - sky
     if( abs( viewZ ) >= INF )
     {
-        gOut_ComposedDiff[ pixelPos ] = Lemi * float( gOnScreen == SHOW_FINAL );
+        gOut_ComposedDiff[ pixelPos ] = Lemi;
         gOut_ComposedSpec_ViewZ[ pixelPos ] = float4( 0, 0, 0, z );
 
         return;
@@ -61,14 +57,13 @@ void main( int2 pixelPos : SV_DispatchThreadId )
     // Direct sun lighting * shadow + emission
     float4 shadowData = gIn_Shadow[ pixelPos ];
 
-    #if( SIGMA_TRANSLUCENT == 1 )
+    #if( SIGMA_TRANSLUCENCY == 1 )
         float3 shadow = SIGMA_BackEnd_UnpackShadow( shadowData ).yzw;
     #else
         float shadow = SIGMA_BackEnd_UnpackShadow( shadowData ).x;
     #endif
 
     float3 Ldirect = gIn_DirectLighting[ pixelPos ];
-    if( gOnScreen < SHOW_INSTANCE_INDEX )
         Ldirect = Ldirect * shadow + Lemi;
 
     // G-buffer
@@ -130,40 +125,6 @@ void main( int2 pixelPos : SV_DispatchThreadId )
             diff.xyz = NRD_SG_ExtractColor( diffSg );
             spec.xyz = NRD_SG_ExtractColor( specSg );
         }
-
-        // ( Optional ) AO / SO
-        diff.w = diffSg.normHitDist;
-        spec.w = specSg.normHitDist;
-    // Decode OCCLUSION mode outputs
-    #elif( NRD_MODE == OCCLUSION )
-        diff.w = diff.x;
-        spec.w = spec.x;
-    // Decode DIRECTIONAL_OCCLUSION mode outputs
-    #elif( NRD_MODE == DIRECTIONAL_OCCLUSION )
-        NRD_SG sg = REBLUR_BackEnd_UnpackDirectionalOcclusion( diff );
-
-        if( gResolve )
-        {
-            // Regain macro-details
-            diff.w = NRD_SG_ResolveDiffuse( sg, N ).x; // or NRD_SH_ResolveDiffuse( sg, N ).x
-
-            // Regain micro-details // TODO: preload N and Z into SMEM
-            float3 Ne = NRD_FrontEnd_UnpackNormalAndRoughness( gIn_Normal_Roughness[ pixelPos + int2( 1, 0 ) ] ).xyz;
-            float3 Nw = NRD_FrontEnd_UnpackNormalAndRoughness( gIn_Normal_Roughness[ pixelPos + int2( -1, 0 ) ] ).xyz;
-            float3 Nn = NRD_FrontEnd_UnpackNormalAndRoughness( gIn_Normal_Roughness[ pixelPos + int2( 0, 1 ) ] ).xyz;
-            float3 Ns = NRD_FrontEnd_UnpackNormalAndRoughness( gIn_Normal_Roughness[ pixelPos + int2( 0, -1 ) ] ).xyz;
-
-            float Ze = gIn_ViewZ[ pixelPos + int2(  1,  0 ) ];
-            float Zw = gIn_ViewZ[ pixelPos + int2( -1,  0 ) ];
-            float Zn = gIn_ViewZ[ pixelPos + int2(  0,  1 ) ];
-            float Zs = gIn_ViewZ[ pixelPos + int2(  0, -1 ) ];
-
-            float scale = NRD_SG_ReJitter( sg, sg, 0.0, V, 0.0, viewZ, Ze, Zw, Zn, Zs, N, Ne, Nw, Nn, Ns ).x;
-
-            diff.w *= scale;
-        }
-        else
-            diff.w = NRD_SG_ExtractColor( sg ).x;
     // Decode NORMAL mode outputs
     #else
         if( gDenoiserType == DENOISER_RELAX )
@@ -177,16 +138,6 @@ void main( int2 pixelPos : SV_DispatchThreadId )
             spec = REBLUR_BackEnd_UnpackRadianceAndNormHitDist( spec );
         }
     #endif
-
-    // ( Optional ) RELAX doesn't support AO / SO
-    if( gDenoiserType == DENOISER_RELAX )
-    {
-        diff.w = 1.0 / Math::Pi( 1.0 );
-        spec.w = 1.0 / Math::Pi( 1.0 );
-    }
-
-    diff.xyz *= gIndirectDiffuse;
-    spec.xyz *= gIndirectSpecular;
 
     // Material modulation ( convert radiance back into irradiance )
     float3 diffFactor, specFactor;
@@ -204,96 +155,13 @@ void main( int2 pixelPos : SV_DispatchThreadId )
     float3 Lspec = spec.xyz * specFactor;
 
     // Apply PSR throughput ( primary surface material before replacement )
-    #if( USE_PSR == 1 )
         float3 psrThroughput = gIn_PsrThroughput[ pixelPos ];
         Ldiff *= psrThroughput;
         Lspec *= psrThroughput;
         Ldirect *= psrThroughput;
-    #else
-        float3 psrThroughput = 1.0;
-    #endif
 
     // IMPORTANT: we store diffuse and specular separately to be able to use the reprojection trick. Let's assume that direct lighting can always be reprojected as diffuse
     Ldiff += Ldirect;
-
-    // Debug
-    if( gOnScreen == SHOW_DENOISED_DIFFUSE )
-        Ldiff = diff.xyz;
-    else if( gOnScreen == SHOW_DENOISED_SPECULAR )
-        Ldiff = spec.xyz;
-    else if( gOnScreen == SHOW_AMBIENT_OCCLUSION )
-        Ldiff = diff.w;
-    else if( gOnScreen == SHOW_SPECULAR_OCCLUSION )
-        Ldiff = spec.w;
-    else if( gOnScreen == SHOW_SHADOW )
-        Ldiff = shadow;
-    else if( gOnScreen == SHOW_BASE_COLOR )
-        Ldiff = baseColorMetalness.xyz;
-    else if( gOnScreen == SHOW_NORMAL )
-        Ldiff = N * 0.5 + 0.5;
-    else if( gOnScreen == SHOW_ROUGHNESS )
-        Ldiff = roughness;
-    else if( gOnScreen == SHOW_METALNESS )
-        Ldiff = baseColorMetalness.w;
-    else if( gOnScreen == SHOW_MATERIAL_ID )
-        Ldiff = materialID / 3.0;
-    else if( gOnScreen == SHOW_PSR_THROUGHPUT )
-        Ldiff = psrThroughput;
-    else if( gOnScreen == SHOW_WORLD_UNITS )
-        Ldiff = frac( X * gUnitToMetersMultiplier );
-    else if( gOnScreen != SHOW_FINAL )
-        Ldiff = gOnScreen == SHOW_MIP_SPECULAR ? spec.xyz : Ldirect.xyz;
-
-    // SHARC debug
-    #if( NRD_MODE < OCCLUSION )
-        HashGridParameters hashGridParams;
-        hashGridParams.cameraPosition = gCameraGlobalPos.xyz;
-        hashGridParams.sceneScale = SHARC_SCENE_SCALE;
-        hashGridParams.logarithmBase = SHARC_GRID_LOGARITHM_BASE;
-        hashGridParams.levelBias = SHARC_GRID_LEVEL_BIAS;
-
-        #if( USE_SHARC_DEBUG == 1 )
-            float3 Xglobal = GetGlobalPos( X );
-
-            // Dithered output
-            #if 0
-                Rng::Hash::Initialize( pixelPos, gFrameIndex );
-
-                uint level = HashGridGetLevel( Xglobal, hashGridParams );
-                float voxelSize = HashGridGetVoxelSize( level, hashGridParams );
-                float3x3 mBasis = Geometry::GetBasis( N );
-                float2 rnd = ( Rng::Hash::GetFloat2( ) - 0.5 ) * voxelSize * USE_SHARC_DITHERING;
-                Xglobal += mBasis[ 0 ] * rnd.x + mBasis[ 1 ] * rnd.y;
-            #endif
-
-            SharcHitData sharcHitData;
-            sharcHitData.positionWorld = Xglobal;
-            sharcHitData.normalWorld = N;
-            sharcHitData.emissive = Lemi;
-
-            HashMapData hashMapData;
-            hashMapData.capacity = SHARC_CAPACITY;
-            hashMapData.hashEntriesBuffer = gInOut_SharcHashEntriesBuffer;
-
-            SharcParameters sharcParams;
-            sharcParams.gridParameters = hashGridParams;
-            sharcParams.hashMapData = hashMapData;
-            sharcParams.enableAntiFireflyFilter = SHARC_ANTI_FIREFLY;
-            sharcParams.voxelDataBuffer = gInOut_SharcVoxelDataBuffer;
-            sharcParams.voxelDataBufferPrev = gInOut_SharcVoxelDataBufferPrev;
-
-            bool isValid = SharcGetCachedRadiance( sharcParams, sharcHitData, Ldiff, true );
-
-            // Highlight invalid cells
-            #if 0
-                Ldiff = isValid ? Ldiff : float3( 1.0, 0.0, 0.0 );
-            #endif
-        #elif( USE_SHARC_DEBUG == 2 )
-            Ldiff = HashGridDebugColoredHash( GetGlobalPos( X ), hashGridParams );
-        #endif
-
-        Lspec *= float( USE_SHARC_DEBUG == 0 );
-    #endif
 
     // Output
     gOut_ComposedDiff[ pixelPos ] = Ldiff;

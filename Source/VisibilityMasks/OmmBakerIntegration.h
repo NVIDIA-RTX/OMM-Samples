@@ -208,18 +208,17 @@ private:
     nri::Device* m_Device;
 
     // CB
-    nri::Descriptor* m_ConstantBufferView;
+    std::vector<nri::Descriptor*> m_ConstantBufferViews;
     nri::Buffer* m_ConstantBuffer;
     nri::Memory* m_ConstantBufferHeap;
-    uint32_t m_ConstantBufferViewSize;
+    uint32_t m_ConstantBufferViewStride;
     uint32_t m_ConstantBufferSize;
-    uint32_t m_ConstantBufferOffset;
 
     // Textures
     nri::Texture* m_DebugTexture;
     nri::Memory* m_DebugTextureMemory;
     nri::Descriptor* m_DebugTextureDescriptor;
-    nri::AccessBits m_DebugTextureState = nri::AccessBits::UNKNOWN;
+    nri::AccessBits m_DebugTextureState = nri::AccessBits::NONE;
 
     nri::Descriptor* m_EmptyDescriptor;
     std::vector<nri::Descriptor*> m_ColorDescriptorPerPipeline;

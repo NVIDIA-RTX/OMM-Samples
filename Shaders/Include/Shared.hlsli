@@ -4,32 +4,21 @@
 // SETTINGS
 //=============================================================================================
 
-// Fused or separate denoising selection
-// 0 - DIFFUSE and SPECULAR
-// 1 - DIFFUSE_SPECULAR
-#define NRD_COMBINED                        1
-
 // NORMAL - common (non specialized) denoisers
 // SH - SH (spherical harmonics or spherical gaussian) denoisers
-// OCCLUSION - OCCLUSION (ambient or specular occlusion only) denoisers
-// DIRECTIONAL_OCCLUSION - DIRECTIONAL_OCCLUSION (ambient occlusion in SH mode) denoisers
-#define NRD_MODE                            NORMAL // NORMAL, SH, OCCLUSION, DIRECTIONAL_OCCLUSION
-#define SIGMA_TRANSLUCENT                   1
+#define NRD_MODE                            NORMAL // NRD sample recompilation required
+#define SIGMA_TRANSLUCENCY                  1
 
 // Default = 1
 #define USE_IMPORTANCE_SAMPLING             1
-#define USE_PSR                             1 // allow primary surface replacement
-#define USE_SHARC_DITHERING                 1 // must be in [0; 1] range
+#define USE_SHARC_DITHERING                 1.5 // radius in voxels
 #define USE_TRANSLUCENCY                    1 // translucent foliage
-#define USE_SHARC_V_DEPENDENT               1 // needed to get a full match with prev frame data // TODO: improve multi-bounce low-roughness case
 #define USE_MOVING_EMISSION_FIX             1 // fixes a dark tail, left by an animated emissive object
 
 // Default = 0
 #define USE_SANITIZATION                    0 // NRD sample is NAN/INF free
 #define USE_SIMULATED_MATERIAL_ID_TEST      0 // "material ID" debugging
 #define USE_SIMULATED_FIREFLY_TEST          0 // "anti-firefly" debugging
-#define USE_CAMERA_ATTACHED_REFLECTION_TEST 0 // test special treatment for reflections of objects attached to the camera
-#define USE_RUSSIAN_ROULETTE                0 // bad practice for real-time denoising
 #define USE_DRS_STRESS_TEST                 0 // NRD must not touch GARBAGE data outside of DRS rectangle
 #define USE_INF_STRESS_TEST                 0 // NRD must not touch GARBAGE data outside of denoising range
 #define USE_ANOTHER_COBALT                  0 // another cobalt variant
@@ -37,8 +26,9 @@
 #define USE_RANDOMIZED_ROUGHNESS            0 // randomize roughness ( a common case in games )
 #define USE_STOCHASTIC_SAMPLING             0 // needed?
 #define USE_LOAD                            0 // Load vs SampleLevel
-#define USE_SHARC_DEBUG                     0 // 1 - show cache, 2 - show grid
+#define USE_SHARC_DEBUG                     0 // 1 - show cache, 2 - show grid (NRD sample recompile required)
 #define USE_TAA_DEBUG                       0 // 1 - show weight
+#define USE_BIAS_FIX                        0 // fixes negligible hair and specular bias
 
 //=============================================================================================
 // CONSTANTS
@@ -47,48 +37,21 @@
 // NRD variant
 #define NORMAL                              0
 #define SH                                  1 // NORMAL + SH (SG) resolve
-#define OCCLUSION                           2
-#define DIRECTIONAL_OCCLUSION               3 // diffuse OCCLUSION + SH (SG) resolve
 
 // Denoiser
 #define DENOISER_REBLUR                     0
 #define DENOISER_RELAX                      1
 #define DENOISER_REFERENCE                  2
 
-// Resolution
-#define RESOLUTION_FULL                     0
-#define RESOLUTION_FULL_PROBABILISTIC       1
-#define RESOLUTION_HALF                     2
-
-// What is on screen?
-#define SHOW_FINAL                          0
-#define SHOW_DENOISED_DIFFUSE               1
-#define SHOW_DENOISED_SPECULAR              2
-#define SHOW_AMBIENT_OCCLUSION              3
-#define SHOW_SPECULAR_OCCLUSION             4
-#define SHOW_SHADOW                         5
-#define SHOW_BASE_COLOR                     6
-#define SHOW_NORMAL                         7
-#define SHOW_ROUGHNESS                      8
-#define SHOW_METALNESS                      9
-#define SHOW_MATERIAL_ID                    10
-#define SHOW_PSR_THROUGHPUT                 11
-#define SHOW_WORLD_UNITS                    12
-#define SHOW_INSTANCE_INDEX                 13
-#define SHOW_UV                             14
-#define SHOW_CURVATURE                      15
-#define SHOW_MIP_PRIMARY                    16
-#define SHOW_MIP_SPECULAR                   17
-
 // Predefined material override
 #define MATERIAL_GYPSUM                     1
 #define MATERIAL_COBALT                     2
 
 // Material ID
-#define MATERIAL_ID_DEFAULT                 0.0
-#define MATERIAL_ID_METAL                   1.0
-#define MATERIAL_ID_HAIR                    2.0
-#define MATERIAL_ID_SELF_REFLECTION         3.0
+#define MATERIAL_ID_DEFAULT                 0.0f
+#define MATERIAL_ID_METAL                   1.0f
+#define MATERIAL_ID_HAIR                    2.0f
+#define MATERIAL_ID_SELF_REFLECTION         3.0f
 
 // Mip mode
 #define MIP_VISIBILITY                      0 // for visibility: emission, shadow and alpha mask
@@ -96,15 +59,13 @@
 #define MIP_SHARP                           2 // for albedo and roughness
 
 // Register spaces ( sets )
-#define SET_GLOBAL                          0
-#define SET_OTHER                           1
-#define SET_RAY_TRACING                     2
-#define SET_SHARC                           3
-#define SET_MORPH                           4
+#define SET_OTHER                           0
+#define SET_RAY_TRACING                     1
+#define SET_SHARC                           2
+#define SET_ROOT                            3
 
 // Path tracing
 #define PT_THROUGHPUT_THRESHOLD             0.001
-#define PT_PSR_THROUGHPUT_THRESHOLD         0.0 // TODO: even small throughput can produce a bright spot if incoming radiance is huge
 #define PT_IMPORTANCE_SAMPLES_NUM           16
 #define PT_SPEC_LOBE_ENERGY                 0.95 // trimmed to 95%
 #define PT_SHADOW_RAY_OFFSET                1.0 // pixels
@@ -114,16 +75,18 @@
 #define PT_EVIL_TWIN_LOBE_TOLERANCE         0.005 // normalized %
 #define PT_GLASS_MIN_F                      0.05 // adds a bit of stability and bias
 #define PT_DELTA_BOUNCES_NUM                8
+#define PT_PSR_BOUNCES_NUM                  2
+#define PT_RAY_FLAGS                        0
 
-// Spatial HAsh-ased Radiance Cache ( SHARC )
+// Spatial HAsh-based Radiance Cache ( SHARC )
 #define SHARC_CAPACITY                      ( 1 << 22 )
-#define SHARC_SCENE_SCALE                   50.0
+#define SHARC_SCENE_SCALE                   45.0
 #define SHARC_DOWNSCALE                     5
-#define SHARC_NORMAL_DITHER                 0.003
-#define SHARC_POS_DITHER                    0.001
-#define SHARC_ANTI_FIREFLY                  true
+#define SHARC_ANTI_FIREFLY                  false
 #define SHARC_STALE_FRAME_NUM_MIN           32 // new version uses 8 by default, old value offers more stability in voxels with low number of samples ( critical for glass )
 #define SHARC_SEPARATE_EMISSIVE             1
+#define SHARC_MATERIAL_DEMODULATION         1
+#define SHARC_USE_FP16                      0
 
 // Blue noise
 #define BLUE_NOISE_SPATIAL_DIM              128 // see StaticTexture::ScramblingRanking
@@ -142,21 +105,18 @@
 #define TAA_SIGMA_SCALE                     2.0 // allow nano ghosting ( was 1.0 ) // TODO: can negatively affect moving shadows
 #define GARBAGE                             sqrt( -1.0 ) // sqrt( -1.0 ) or -log( 0.0 ) or 32768.0
 
-#define MORPH_MAX_ACTIVE_TARGETS_NUM        8u
-#define MORPH_ELEMENTS_PER_ROW_NUM          4
-#define MORPH_ROWS_NUM                      ( MORPH_MAX_ACTIVE_TARGETS_NUM / MORPH_ELEMENTS_PER_ROW_NUM )
-
 // Instance flags
-#define FLAG_FIRST_BIT                      25 // this + number of flags must be <= 32
+#define FLAG_FIRST_BIT                      24 // this + number of flags must be <= 32
 #define NON_FLAG_MASK                       ( ( 1 << FLAG_FIRST_BIT ) - 1 )
 
 #define FLAG_NON_TRANSPARENT                0x01 // geometry flag: non-transparent
 #define FLAG_TRANSPARENT                    0x02 // geometry flag: transparent
 #define FLAG_FORCED_EMISSION                0x04 // animated emissive cube
 #define FLAG_STATIC                         0x08 // no velocity
-#define FLAG_DEFORMABLE                     0x10 // local animation
-#define FLAG_HAIR                           0x20 // hair
-#define FLAG_LEAF                           0x40 // leaf
+#define FLAG_HAIR                           0x10 // hair
+#define FLAG_LEAF                           0x20 // leaf
+#define FLAG_SKIN                           0x40 // skin
+#define FLAG_MORPH                          0x80 // morph
 
 #define GEOMETRY_ALL                        ( FLAG_NON_TRANSPARENT | FLAG_TRANSPARENT )
 
@@ -165,63 +125,39 @@
 //===============================================================
 // IMPORTANT: sizeof( float3 ) == 16 in C++ code!
 
-struct MorphVertex // same as utils::MorphVertex
-{
-    float16_t4 pos;
-    float16_t2 N;
-    float16_t2 T;
-};
-
-struct MorphedAttributes
-{
-    float16_t2 N;
-    float16_t2 T;
-};
-
-struct MorphedPrimitivePrevPositions
-{
-    float16_t4 pos0;
-    float16_t4 pos1;
-    float16_t4 pos2;
-};
-
 struct PrimitiveData
 {
     float16_t2 uv0;
     float16_t2 uv1;
     float16_t2 uv2;
-    float16_t2 n0;
+    float worldArea;
 
+    float16_t2 n0;
     float16_t2 n1;
     float16_t2 n2;
+    float uvArea;
+
     float16_t2 t0;
     float16_t2 t1;
-
     float16_t2 t2;
-    float16_t2 bitangentSign_unused;
-    float worldArea;
-    float uvArea;
+    float bitangentSign;
 };
 
 struct InstanceData
 {
     // For static: mObjectToWorld
-    // For rigid dynamic: mWorldToWorldPrev
-    // For deformable dynamic: mObjectToWorldPrev
+    // For dynamic: mWorldToWorldPrev
     float4 mOverloadedMatrix0;
     float4 mOverloadedMatrix1;
     float4 mOverloadedMatrix2;
 
-    float4 baseColorAndMetalnessScale;
-    float4 emissionAndRoughnessScale;
+    float16_t4 baseColorAndMetalnessScale;
+    float16_t4 emissionAndRoughnessScale;
 
+    float16_t2 normalUvScale;
     uint32_t textureOffsetAndFlags;
     uint32_t primitiveOffset;
-    uint32_t morphedPrimitiveOffset;
-
-    // TODO: handling object scale embedded into the transformation matrix (assuming uniform scale)
-    // TODO: sign represents triangle winding
-    float scale;
+    float scale; // TODO: handling object scale embedded into the transformation matrix (assuming uniform scale), sign represents triangle winding
 };
 
 //===============================================================
@@ -230,7 +166,7 @@ struct InstanceData
 
 #include "NRI.hlsl"
 
-NRI_RESOURCE( cbuffer, GlobalConstants, b, 0, SET_GLOBAL )
+NRI_RESOURCE( cbuffer, GlobalConstants, b, 0, SET_ROOT )
 {
     float4x4 gViewToWorld;
     float4x4 gViewToClip;
@@ -248,11 +184,9 @@ NRI_RESOURCE( cbuffer, GlobalConstants, b, 0, SET_GLOBAL )
     float4 gViewDirection;
     float4 gHairBaseColor;
     float2 gHairBetas;
-    float2 gWindowSize; // represents DPI handling ( >= gOutputSize )
     float2 gOutputSize; // represents native resolution ( >= gRenderSize )
     float2 gRenderSize; // up to native resolution ( >= gRectSize )
     float2 gRectSize; // dynamic resolution scaling
-    float2 gInvWindowSize;
     float2 gInvOutputSize;
     float2 gInvRenderSize;
     float2 gInvRectSize;
@@ -264,13 +198,10 @@ NRI_RESOURCE( cbuffer, GlobalConstants, b, 0, SET_GLOBAL )
     float gRoughnessOverride;
     float gMetalnessOverride;
     float gUnitToMetersMultiplier;
-    float gIndirectDiffuse;
-    float gIndirectSpecular;
     float gTanSunAngularRadius;
     float gTanPixelAngularRadius;
     float gDebug;
     float gPrevFrameConfidence;
-    float gMinProbability;
     float gUnproject;
     float gAperture;
     float gFocalDistance;
@@ -283,47 +214,18 @@ NRI_RESOURCE( cbuffer, GlobalConstants, b, 0, SET_GLOBAL )
     uint32_t gSharcMaxAccumulatedFrameNum;
     uint32_t gDenoiserType;
     uint32_t gDisableShadowsAndEnableImportanceSampling; // TODO: remove - modify GetSunIntensity to return 0 if sun is below horizon
-    uint32_t gOnScreen;
     uint32_t gFrameIndex;
     uint32_t gForcedMaterial;
     uint32_t gUseNormalMap;
-    uint32_t gTracingMode;
-    uint32_t gSampleNum;
     uint32_t gBounceNum;
     uint32_t gResolve;
-    uint32_t gPSR;
-    uint32_t gSHARC;
     uint32_t gValidation;
-    uint32_t gTrimLobe;
     uint32_t gSR;
     uint32_t gRR;
     uint32_t gIsSrgb;
-    // omm sample specific
     uint32_t gHightlightAhs;
     uint32_t gAhsDynamicMipSelection;
     uint32_t gOnlyNonOpaque;
-};
-
-NRI_RESOURCE( cbuffer, MorphMeshUpdateVerticesConstants, b, 0, SET_MORPH )
-{
-    uint4 gIndices[ MORPH_ROWS_NUM ];
-    float4 gWeights[ MORPH_ROWS_NUM ];
-
-    uint32_t gNumWeights;
-    uint32_t gNumVertices;
-    uint32_t gPositionCurrFrameOffset;
-    uint32_t gAttributesOutputOffset;
-};
-
-NRI_RESOURCE( cbuffer, MorphMeshUpdatePrimitivesConstants, b, 0, SET_MORPH )
-{
-    uint2 gPositionFrameOffsets;
-    uint32_t gNumPrimitives;
-    uint32_t gIndexOffset;
-
-    uint32_t gAttributesOffset;
-    uint32_t gPrimitiveOffset;
-    uint32_t gMorphedPrimitiveOffset;
 };
 
 #if( !defined( __cplusplus ) )
@@ -331,9 +233,9 @@ NRI_RESOURCE( cbuffer, MorphMeshUpdatePrimitivesConstants, b, 0, SET_MORPH )
 #include "ml.hlsli"
 #include "NRD.hlsli"
 
-NRI_RESOURCE( SamplerState, gLinearMipmapLinearSampler, s, 0, SET_GLOBAL );
-NRI_RESOURCE( SamplerState, gLinearMipmapNearestSampler, s, 1, SET_GLOBAL );
-NRI_RESOURCE( SamplerState, gNearestMipmapNearestSampler, s, 2, SET_GLOBAL );
+NRI_RESOURCE( SamplerState, gLinearMipmapLinearSampler, s, 0, SET_ROOT );
+NRI_RESOURCE( SamplerState, gLinearMipmapNearestSampler, s, 1, SET_ROOT );
+NRI_RESOURCE( SamplerState, gNearestMipmapNearestSampler, s, 2, SET_ROOT );
 
 #define gLinearSampler gLinearMipmapLinearSampler
 #define gNearestSampler gNearestMipmapNearestSampler
@@ -352,7 +254,7 @@ float3 GetGlobalPos( float3 X )
 float GetSpecMagicCurve( float roughness )
 {
     float f = 1.0 - exp2( -200.0 * roughness * roughness );
-    f *= Math::Pow01( roughness, 0.25 );
+    f *= Math::Pow01( roughness, 0.5 );
 
     return f;
 }
@@ -383,7 +285,6 @@ float3 GetMotion( float3 X, float3 Xprev )
 
 float3 ApplyExposure( float3 Lsum )
 {
-    if( gOnScreen <= SHOW_DENOISED_SPECULAR )
         Lsum *= gExposure;
 
     return Lsum;
@@ -391,12 +292,7 @@ float3 ApplyExposure( float3 Lsum )
 
 float3 ApplyTonemap( float3 Lsum )
 {
-    #if( NRD_MODE < OCCLUSION )
-        if( gOnScreen == SHOW_FINAL )
             Lsum = gHdrScale * Color::HdrToLinear_Uncharted( Lsum );
-    #else
-        Lsum = Lsum.xxx;
-    #endif
 
     return Lsum;
 }
