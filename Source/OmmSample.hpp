@@ -921,14 +921,30 @@ bool Sample::Initialize(nri::GraphicsAPI graphicsAPI, bool) {
     deviceCreationDesc.queueFamilies = queueFamilies;
     deviceCreationDesc.queueFamilyNum = uint32_t(std::size(queueFamilies));
 #pragma endregion
-    NRI_ABORT_ON_FAILURE(nri::nriCreateDevice(deviceCreationDesc, m_Device));
 
+    NRI_ABORT_ON_FAILURE(nri::nriCreateDevice(deviceCreationDesc, m_Device));
     NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::CoreInterface), (nri::CoreInterface*)&NRI));
     NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::HelperInterface), (nri::HelperInterface*)&NRI));
     NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::RayTracingInterface), (nri::RayTracingInterface*)&NRI));
     NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::StreamerInterface), (nri::StreamerInterface*)&NRI));
     NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::SwapChainInterface), (nri::SwapChainInterface*)&NRI));
     NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::UpscalerInterface), (nri::UpscalerInterface*)&NRI));
+
+#pragma region[ OmmSample specific ]
+    #if DXR_OMM
+    {
+        nri::DeviceDesc deviceDesc = NRI.GetDeviceDesc(*m_Device);
+        if (deviceDesc.graphicsAPI == nri::GraphicsAPI::D3D12 && deviceDesc.tiers.rayTracing < 3) {
+            const char* errorMessage =
+                "D3D12_RAYTRACING_TIER_1_2 is required for Opacity Micromaps.\n\n"
+                "Please make sure GPU supports this tier and update driver to the latest.\n\n"
+                "Or disable DXR_OMM in CmakeLisit.txt to use NVAPI instead";
+            MessageBoxA(nullptr, errorMessage, "DXR 1.2 Support Required", MB_OK | MB_ICONERROR);
+            NRI_ABORT_ON_FALSE(false);
+        }
+    }
+    #endif
+#pragma endregion
 
     NRI_ABORT_ON_FAILURE(NRI.GetQueue(*m_Device, nri::QueueType::GRAPHICS, 0, m_GraphicsQueue));
     NRI_ABORT_ON_FAILURE(NRI.CreateFence(*m_Device, 0, m_FrameFence));
