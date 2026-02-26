@@ -99,9 +99,10 @@ endif()
 # SHARC
 FetchContent_Declare(
     sharc
-    GIT_REPOSITORY https://github.com/NVIDIA-RTX/SHARC.git
-    GIT_TAG v1.6.0.0
-    GIT_SHALLOW 1
+    DOWNLOAD_EXTRACT_TIMESTAMP 1
+    DOWNLOAD_NO_PROGRESS 1
+    SOURCE_SUBDIR "ignore CMakeLists.txt"
+    URL https://github.com/NVIDIA-RTX/SHARC/archive/6893c9af2a16df07de0cd1b70a85404e2f8fc5e8.zip
 )
 list(APPEND DEPS sharc)
 
@@ -109,9 +110,10 @@ list(APPEND DEPS sharc)
 if(RTXCR_INTEGRATION)
     FetchContent_Declare(
         rtxcr
-        GIT_REPOSITORY https://github.com/NVIDIA-RTX/RTXCR-Material-Library.git
-        GIT_TAG v1.1.0
-        GIT_SHALLOW 1
+        DOWNLOAD_EXTRACT_TIMESTAMP 1
+        DOWNLOAD_NO_PROGRESS 1
+        SOURCE_SUBDIR "ignore CMakeLists.txt"
+        URL https://github.com/NVIDIA-RTX/RTXCR-Material-Library/archive/refs/tags/v1.1.0.zip
     )
     list(APPEND DEPS rtxcr)
 
@@ -120,6 +122,7 @@ if(RTXCR_INTEGRATION)
         GIT_REPOSITORY https://github.com/NVIDIA-RTX/RTXCR-Assets.git
         GIT_TAG v1.1.0
         GIT_SHALLOW 1
+        SOURCE_SUBDIR "ignore CMakeLists.txt"
         SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/_Data/Scenes/Claire"
     )
     list(APPEND DEPS claire)
@@ -155,6 +158,56 @@ if(WIN32)
     set(COMPILE_DEFINITIONS WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
 endif()
 
+# OMM sample
+file(GLOB OMM_SAMPLE_SOURCE "Source/*.cpp" "Source/*.hpp")
+source_group("" FILES ${OMM_SAMPLE_SOURCE})
+
+add_executable(${PROJECT_NAME} ${OMM_SAMPLE_SOURCE})
+
+if (DXR_OMM)
+
+    target_compile_definitions(${PROJECT_NAME} PRIVATE DXR_OMM=1)
+
+    set(NRI_AGILITY_SDK_VERSION_MAJOR "618" CACHE STRING "" FORCE)
+    set(NRI_AGILITY_SDK_VERSION_MINOR "5" CACHE STRING "" FORCE)
+    set(ASDK_NUPKG "https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.${NRI_AGILITY_SDK_VERSION_MAJOR}.${NRI_AGILITY_SDK_VERSION_MINOR}")
+
+    FetchContent_Declare(
+        agilitysdk
+        DOWNLOAD_EXTRACT_TIMESTAMP 1
+        DOWNLOAD_NO_PROGRESS 1
+        SOURCE_SUBDIR "ignore CMakeLists.txt"
+        URL "${ASDK_NUPKG}"
+    )
+
+    message(STATUS "AgilitySDK: v1.${NRI_AGILITY_SDK_VERSION_MAJOR}.${NRI_AGILITY_SDK_VERSION_MINOR}")
+
+else()
+    # NVAPI
+    set(NVAPI_DEP)
+    FetchContent_Declare(
+        nvapi
+        GIT_REPOSITORY https://github.com/NVIDIA/nvapi.git
+        GIT_TAG main
+        GIT_SHALLOW 1
+    )
+    list(APPEND NVAPI_DEP nvapi)
+
+    if(NVAPI_DEP)
+        message(STATUS "Downloading ${NVAPI_DEP}")
+        FetchContent_MakeAvailable(${NVAPI_DEP})
+    endif()
+
+    find_library(NVAPI_LIB NAMES nvapi64 nvapi PATHS "${nvapi_SOURCE_DIR}/amd64" REQUIRED)
+    if (NVAPI_LIB)
+        set(NVAPI_LIB_PATH "${nvapi_SOURCE_DIR}/amd64/nvapi64.lib")
+        target_link_libraries(${PROJECT_NAME} PRIVATE ${NVAPI_LIB_PATH})
+        target_include_directories(${PROJECT_NAME} PRIVATE "${nvapi_SOURCE_DIR}")
+    else()
+        message(FATAL_ERROR "Can't find NVAPI64 LIB")
+    endif()
+endif()
+
 # External/NRIFramework
 set(NRI_SHADERS_PATH "${SHADER_OUTPUT_PATH}" CACHE STRING "")
 option(NRI_ENABLE_NONE_SUPPORT "" OFF)
@@ -168,13 +221,16 @@ endif()
 
 add_subdirectory("External/NRIFramework")
 
+if(DXR_OMM AND NRI_ENABLE_AGILITY_SDK_SUPPORT)
+    FetchContent_GetProperties(agilitysdk)
+    target_include_directories(${PROJECT_NAME} PRIVATE "${agilitysdk_SOURCE_DIR}")
+endif()
+
 # External/NRD
 set(NRD_SHADERS_PATH "${SHADER_OUTPUT_PATH}" CACHE STRING "")
 set(NRD_NORMAL_ENCODING "2" CACHE STRING "")
 set(NRD_ROUGHNESS_ENCODING "1" CACHE STRING "")
-set(NRD_EMBEDS_DXBC_SHADERS "0" CACHE STRING "")
 option(NRD_SUPPORTS_CHECKERBOARD "" OFF)
-option(NRD_SUPPORTS_HISTORY_CONFIDENCE "" OFF)
 option(NRD_SUPPORTS_DISOCCLUSION_THRESHOLD_MIX "" OFF)
 option(NRD_SUPPORTS_BASECOLOR_METALNESS "" OFF)
 
@@ -217,63 +273,10 @@ get_target_property(ML_SOURCE_DIR MathLib SOURCE_DIR)
 get_target_property(NRI_SOURCE_DIR NRI SOURCE_DIR)
 get_target_property(NRD_SOURCE_DIR NRD SOURCE_DIR)
 
-# OMM sample
-file(GLOB OMM_SAMPLE_SOURCE "Source/*.cpp" "Source/*.hpp")
-source_group("" FILES ${OMM_SAMPLE_SOURCE})
-
-add_executable(${PROJECT_NAME} ${OMM_SAMPLE_SOURCE})
-
-if (DXR_OMM)
-# DXR 1.2 API. AgilitySDK is handled by NRI
-    target_compile_definitions(${PROJECT_NAME} PRIVATE DXR_OMM=1)
-
-    set(ASDK_DEP)
-
-    FetchContent_Declare(
-        agilitysdk
-        DOWNLOAD_EXTRACT_TIMESTAMP 1
-        DOWNLOAD_NO_PROGRESS 1
-        URL https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.${NRI_AGILITY_SDK_VERSION_MAJOR}.${NRI_AGILITY_SDK_VERSION_MINOR}
-    )
-    list(APPEND ASDK_DEP agilitysdk)
-
-    if(ASDK_DEP)
-        message(STATUS "Downloading ${ASDK_DEP}")
-        FetchContent_MakeAvailable(${ASDK_DEP})
-        target_include_directories(${PROJECT_NAME} PRIVATE "${agilitysdk_SOURCE_DIR}")
-    else()
-        message(FATAL_ERROR "AgilitySDK Failed")
-    endif()
-else()
-    # NVAPI
-    set(NVAPI_DEP)
-    FetchContent_Declare(
-        nvapi
-        GIT_REPOSITORY https://github.com/NVIDIA/nvapi.git
-        GIT_TAG main
-        GIT_SHALLOW 1
-    )
-    list(APPEND NVAPI_DEP nvapi)
-
-    if(NVAPI_DEP)
-        message(STATUS "Downloading ${NVAPI_DEP}")
-        FetchContent_MakeAvailable(${NVAPI_DEP})
-    endif()
-
-    find_library(NVAPI_LIB NAMES nvapi64 nvapi PATHS "${nvapi_SOURCE_DIR}/amd64" REQUIRED)
-    if (NVAPI_LIB)
-        set(NVAPI_LIB_PATH "${nvapi_SOURCE_DIR}/amd64/nvapi64.lib")
-        target_link_libraries(${PROJECT_NAME} PRIVATE ${NVAPI_LIB_PATH})
-        target_include_directories(${PROJECT_NAME} PRIVATE "${nvapi_SOURCE_DIR}")
-    else()
-        message(FATAL_ERROR "Can't find NVAPI64 LIB")
-    endif()
-endif()
-
 target_include_directories(${PROJECT_NAME} PRIVATE
     "Source"
     "External"
-    "External/omm_bake/libraries/omm-lib/include"
+    "External/Opacity-MicroMap-SDK/libraries/omm-lib/include"
     "$ENV{VULKAN_SDK}/include"
 )
 
@@ -337,7 +340,7 @@ set(SHADERMAKE_GENERAL_ARGS
     -I "Shaders"
     -I "External"
     -I "${ML_SOURCE_DIR}"
-    -I "${NRD_SOURCE_DIR}/Shaders/Include"
+    -I "${NRD_SOURCE_DIR}/Shaders"
     -I "${NRI_SOURCE_DIR}/Include"
     -I "${sharc_SOURCE_DIR}/include"
     -I "${rtxcr_SOURCE_DIR}/shaders/include/rtxcr"

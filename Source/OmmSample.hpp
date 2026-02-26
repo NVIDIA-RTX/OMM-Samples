@@ -41,7 +41,7 @@ constexpr bool CAMERA_RELATIVE = true;
 constexpr bool ALLOW_BLAS_MERGING = true;
 constexpr bool ALLOW_HDR = NRIF_PLATFORM == NRIF_WINDOWS; // use "WIN + ALT + B" to switch HDR mode
 constexpr bool USE_LOW_PRECISION_FP_FORMATS = true;       // saves a bit of memory and performance
-constexpr bool USE_DLSS_TNN = false;                      // replace CNN (legacy) with TNN (better)
+constexpr uint8_t DLSS_PRESET = 0;
 constexpr nri::UpscalerType upscalerType = nri::UpscalerType::DLSR;
 constexpr int32_t MAX_HISTORY_FRAME_NUM = (int32_t)std::min(60u, std::min(nrd::REBLUR_MAX_HISTORY_FRAME_NUM, nrd::RELAX_MAX_HISTORY_FRAME_NUM));
 constexpr uint32_t TEXTURES_PER_MATERIAL = 4;
@@ -81,8 +81,6 @@ const std::vector<uint32_t> DLRR_interior_improveMeTests = {{
     222,         // diffuse darkening
 }};
 
-// TODO: add tests for SIGMA, active when "Shadow" visualization is on
-
 //=================================================================================
 
 // UI
@@ -100,7 +98,7 @@ enum class AccelerationStructure : uint32_t {
     BLAS_MergedOpaque,
     BLAS_MergedTransparent,
     BLAS_MergedEmissive,
-    BLAS_Other
+    BLAS_Other // many
 };
 
 enum class Buffer : uint32_t {
@@ -111,6 +109,8 @@ enum class Buffer : uint32_t {
     SharcResolved,
     WorldScratch,
     LightScratch,
+
+    MAX_NUM
 };
 
 enum class Texture : uint32_t {
@@ -130,18 +130,16 @@ enum class Texture : uint32_t {
     Unfiltered_Translucency,
     Validation,
     Composed,
+    Gradient_StoredPing,
+    Gradient_StoredPong,
+    Gradient_Ping,
+    Gradient_Pong,
 
     // History
     ComposedDiff,
     ComposedSpec_ViewZ,
-    TaaHistory,
-    TaaHistoryPrev,
-
-    // RR guides
-    RRGuide_DiffAlbedo,
-    RRGuide_SpecAlbedo,
-    RRGuide_SpecHitDistance,
-    RRGuide_Normal_Roughness, // only RGBA16f encoding is supported
+    TaaHistoryPing,
+    TaaHistoryPong,
 
     // Output resolution
     DlssOutput,
@@ -158,13 +156,34 @@ enum class Texture : uint32_t {
     SpecSh,
 #endif
 
-    // Read-only
-    MaterialTextures,
+    // RR guides
+    RRGuide_DiffAlbedo,
+    RRGuide_SpecAlbedo,
+    RRGuide_SpecHitDistance,
+    RRGuide_Normal_Roughness, // only RGBA16f encoding is supported
+
+    // Read-only (must be last)
+    BaseReadOnlyTexture,
+};
+
+enum class Descriptor : uint32_t {
+    // Constant buffer
+    Constant_Buffer,
+
+    // Acceleration structures
+    TLAS_World,
+    TLAS_Emissive,
+
+    // Buffers and textures
+    BaseBuffer = TLAS_Emissive + 1,
+    BaseTexture = BaseBuffer + (uint32_t)Buffer::MAX_NUM * 2,
+    BaseReadOnlyTexture = BaseTexture + (uint32_t)Texture::BaseReadOnlyTexture * 2,
 };
 
 enum class Pipeline : uint32_t {
     SharcUpdate,
     SharcResolve,
+    ConfidenceBlur,
     TraceOpaque,
     Composition,
     TraceTransparent,
@@ -172,101 +191,16 @@ enum class Pipeline : uint32_t {
     Final,
     DlssBefore,
     DlssAfter,
-};
 
-enum class Descriptor : uint32_t {
-    World_AccelerationStructure,
-    Light_AccelerationStructure,
-
-    Constant_Buffer,
-    InstanceData_Buffer,
-    PrimitiveData_Buffer,
-    PrimitiveData_StorageBuffer,
-    SharcHashEntries_StorageBuffer,
-    SharcAccumulated_StorageBuffer,
-    SharcResolved_StorageBuffer,
-
-    ViewZ_Texture,
-    ViewZ_StorageTexture,
-    Mv_Texture,
-    Mv_StorageTexture,
-    Normal_Roughness_Texture,
-    Normal_Roughness_StorageTexture,
-    PsrThroughput_Texture,
-    PsrThroughput_StorageTexture,
-    BaseColor_Metalness_Texture,
-    BaseColor_Metalness_StorageTexture,
-    DirectLighting_Texture,
-    DirectLighting_StorageTexture,
-    DirectEmission_Texture,
-    DirectEmission_StorageTexture,
-    Shadow_Texture,
-    Shadow_StorageTexture,
-    Diff_Texture,
-    Diff_StorageTexture,
-    Spec_Texture,
-    Spec_StorageTexture,
-    Unfiltered_Penumbra_Texture,
-    Unfiltered_Penumbra_StorageTexture,
-    Unfiltered_Diff_Texture,
-    Unfiltered_Diff_StorageTexture,
-    Unfiltered_Spec_Texture,
-    Unfiltered_Spec_StorageTexture,
-    Unfiltered_Translucency_Texture,
-    Unfiltered_Translucency_StorageTexture,
-    Validation_Texture,
-    Validation_StorageTexture,
-    Composed_Texture,
-    Composed_StorageTexture,
-
-    // History
-    ComposedDiff_Texture,
-    ComposedDiff_StorageTexture,
-    ComposedSpec_ViewZ_Texture,
-    ComposedSpec_ViewZ_StorageTexture,
-    TaaHistory_Texture,
-    TaaHistory_StorageTexture,
-    TaaHistoryPrev_Texture,
-    TaaHistoryPrev_StorageTexture,
-
-    // RR guides
-    RRGuide_DiffAlbedo_Texture,
-    RRGuide_DiffAlbedo_StorageTexture,
-    RRGuide_SpecAlbedo_Texture,
-    RRGuide_SpecAlbedo_StorageTexture,
-    RRGuide_SpecHitDistance_Texture,
-    RRGuide_SpecHitDistance_StorageTexture,
-    RRGuide_Normal_Roughness_Texture,
-    RRGuide_Normal_Roughness_StorageTexture,
-
-    // Output resolution
-    DlssOutput_Texture,
-    DlssOutput_StorageTexture,
-    PreFinal_Texture,
-    PreFinal_StorageTexture,
-
-    // Window resolution
-    Final_Texture,
-    Final_StorageTexture,
-
-    // SH
-#if (NRD_MODE == SH)
-    Unfiltered_DiffSh_Texture,
-    Unfiltered_DiffSh_StorageTexture,
-    Unfiltered_SpecSh_Texture,
-    Unfiltered_SpecSh_StorageTexture,
-    DiffSh_Texture,
-    DiffSh_StorageTexture,
-    SpecSh_Texture,
-    SpecSh_StorageTexture,
-#endif
-
-    // Read-only
-    MaterialTextures,
+    MAX_NUM
 };
 
 enum class DescriptorSet : uint32_t {
     // SET_OTHER
+    SharcUpdatePing,
+    SharcUpdatePong,
+    ConfidenceBlurPing,
+    ConfidenceBlurPong,
     TraceOpaque,
     Composition,
     TraceTransparent,
@@ -281,6 +215,8 @@ enum class DescriptorSet : uint32_t {
 
     // SET_SHARC
     Sharc,
+
+    MAX_NUM
 };
 
 // NRD sample doesn't use several instances of the same denoiser in one NRD instance (like REBLUR_DIFFUSE x 3),
@@ -303,7 +239,8 @@ struct Settings {
     float exposure = 80.0f;
     float roughnessOverride = 0.0f;
     float metalnessOverride = 0.0f;
-    float emissionIntensity = 1.0f;
+    float emissionIntensityLights = 1.0f;
+    float emissionIntensityCubes = 1.0f;
     float debug = 0.0f;
     float meterToUnitsMultiplier = 1.0f;
     float emulateMotionSpeed = 1.0f;
@@ -312,7 +249,6 @@ struct Settings {
     float animationProgress = 0.0f;
     float animationSpeed = 0.0f;
     float hitDistScale = 3.0f;
-    float unused1 = 0.0f;
     float resolutionScale = 1.0f;
     float sharpness = 0.15f;
 
@@ -355,19 +291,11 @@ struct Settings {
     bool boost = false;
     bool SR = false;
     bool RR = false;
+    bool confidence = true;
 #pragma region[ OmmSample specific ]
     bool highLightAhs = true;
     bool ahsDynamicMipSelection = true;
 #pragma endregion
-};
-
-struct DescriptorDesc {
-    const char* debugName;
-    void* resource;
-    nri::Format format;
-    nri::TextureUsageBits textureUsage;
-    nri::BufferUsageBits bufferUsage;
-    bool isArray;
 };
 
 struct TextureState {
@@ -385,7 +313,7 @@ struct AnimatedInstance {
     bool reverseRotation = true;
     bool reverseDirection = true;
 
-    float4x4 Animate(float elapsedSeconds, float scale, float3& position) {
+    inline float4x4 Animate(float elapsedSeconds, float scale, float3& position) {
         float angle = progressedSec / durationSec;
         angle = Pi(angle * 2.0f - 1.0f);
 
@@ -394,7 +322,7 @@ struct AnimatedInstance {
         localPosition.y = sin(reverseDirection ? -angle : angle);
         localPosition.z = localPosition.y;
 
-        position = basePosition + localPosition * elipseAxis * scale;
+        position = basePosition + localPosition * elipseAxis;
 
         float4x4 transform;
         transform.SetupByRotation(reverseRotation ? -angle : angle, rotationAxis);
@@ -469,12 +397,32 @@ struct OmmBatch {
 
 class Sample : public SampleBase {
 public:
-    inline Sample() {
 #pragma region[ OmmSample specific ]
+    inline Sample() {
         m_SceneFile = "Bistro/BistroExterior.gltf";
         m_OutputResolution = {1920, 1080};
-#pragma endregion
     }
+
+    void InitCmdLine(cmdline::parser& cmdLine) override {
+        cmdLine.add<int32_t>("dlssQuality", 'd', "DLSS quality: [-1: 4]", false, -1, cmdline::range(-1, 4));
+        cmdLine.add("debugNRD", 0, "enable NRD validation");
+
+        cmdLine.add("ommDebugMode", 0, "enable omm-bake Nsight debug mode");
+        cmdLine.add("disableOmmBlasBuild", 0, "disable masked geometry building. Baking only");
+        cmdLine.add("enableOmmCache", 0, "enable omm init from cache");
+        cmdLine.add<uint32_t>("ommBuildPostponeFrameId", 0, "build OMM on desired frameId", false, 0);
+    }
+
+    void ReadCmdLine(cmdline::parser& cmdLine) override {
+        m_DlssQuality = cmdLine.get<int32_t>("dlssQuality");
+        m_DebugNRD = cmdLine.exist("debugNRD");
+
+        m_OmmBakeDesc.enableDebugMode = cmdLine.exist("ommDebugMode");
+        m_OmmBakeDesc.buildFrameId = cmdLine.get<uint32_t>("ommBuildPostponeFrameId");
+        m_DisableOmmBlasBuild = cmdLine.exist("disableOmmBlasBuild");
+        m_OmmBakeDesc.enableCache = cmdLine.exist("enableOmmCache");
+    }
+#pragma endregion
 
     ~Sample();
 
@@ -502,10 +450,6 @@ public:
         return m_Pipelines[(uint32_t)index];
     }
 
-    inline nri::Descriptor*& Get(Descriptor index) {
-        return m_Descriptors[(uint32_t)index];
-    }
-
     inline nri::DescriptorSet*& Get(DescriptorSet index) {
         return m_DescriptorSets[(uint32_t)index];
     }
@@ -514,13 +458,37 @@ public:
         return m_AccelerationStructures[(uint32_t)index];
     }
 
+    inline nri::Descriptor*& GetDescriptor(Descriptor index) {
+        return m_Descriptors[(uint32_t)index];
+    }
+
+    inline nri::Descriptor*& GetDescriptor(Buffer buffer) {
+        return m_Descriptors[(uint32_t)Descriptor::BaseBuffer + (uint32_t)buffer * 2];
+    }
+
+    inline nri::Descriptor*& GetStorageDescriptor(Buffer buffer) {
+        return m_Descriptors[(uint32_t)Descriptor::BaseBuffer + (uint32_t)buffer * 2 + 1];
+    }
+
+    inline nri::Descriptor*& GetDescriptor(Texture texture) {
+        return m_Descriptors[(uint32_t)Descriptor::BaseTexture + (uint32_t)texture * 2];
+    }
+
+    inline nri::Descriptor*& GetStorageDescriptor(Texture texture) {
+        return m_Descriptors[(uint32_t)Descriptor::BaseTexture + (uint32_t)texture * 2 + 1];
+    }
+
+    inline nri::Descriptor*& GetDescriptorForReadOnlyTexture(uint32_t index) {
+        return m_Descriptors[(uint32_t)Descriptor::BaseReadOnlyTexture + index];
+    }
+
     inline nrd::Resource GetNrdResource(Texture index) {
         nri::TextureBarrierDesc* textureState = &m_TextureStates[(uint32_t)index];
 
         nrd::Resource resource = {};
         resource.state = textureState->after;
         resource.userArg = textureState;
-            resource.nri.texture = textureState->texture;
+        resource.nri.texture = textureState->texture;
 
         return resource;
     }
@@ -542,10 +510,12 @@ public:
             // Diffuse
             resourceSnapshot.SetResource(nrd::ResourceType::IN_DIFF_RADIANCE_HITDIST, GetNrdResource(Texture::Unfiltered_Diff));
             resourceSnapshot.SetResource(nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST, GetNrdResource(Texture::Diff));
+            resourceSnapshot.SetResource(nrd::ResourceType::IN_DIFF_CONFIDENCE, GetNrdResource(Texture::Gradient_Pong));
 
             // Specular
             resourceSnapshot.SetResource(nrd::ResourceType::IN_SPEC_RADIANCE_HITDIST, GetNrdResource(Texture::Unfiltered_Spec));
             resourceSnapshot.SetResource(nrd::ResourceType::OUT_SPEC_RADIANCE_HITDIST, GetNrdResource(Texture::Spec));
+            resourceSnapshot.SetResource(nrd::ResourceType::IN_SPEC_CONFIDENCE, GetNrdResource(Texture::Gradient_Pong));
 
 #if (NRD_MODE == SH)
             // Diffuse SH
@@ -572,7 +542,7 @@ public:
         }
 
         // Denoise
-            m_NRD.Denoise(denoisers, denoiserNum, commandBuffer, resourceSnapshot);
+        m_NRD.Denoise(denoisers, denoiserNum, commandBuffer, resourceSnapshot);
 
         // Retrieve state
         if (!resourceSnapshot.restoreInitialState) {
@@ -582,16 +552,6 @@ public:
                 state->after = resourceSnapshot.unique[i].state;
             }
         }
-    }
-
-    inline void InitCmdLine(cmdline::parser& cmdLine) override {
-        cmdLine.add<int32_t>("dlssQuality", 'd', "DLSS quality: [-1: 4]", false, -1, cmdline::range(-1, 4));
-        cmdLine.add("debugNRD", 0, "enable NRD validation");
-    }
-
-    inline void ReadCmdLine(cmdline::parser& cmdLine) override {
-        m_DlssQuality = cmdLine.get<int32_t>("dlssQuality");
-        m_DebugNRD = cmdLine.exist("debugNRD");
     }
 
     inline nrd::RelaxSettings GetDefaultRelaxSettings() const {
@@ -604,6 +564,7 @@ public:
         defaults.specularMaxAccumulatedFrameNum = m_RelaxSettings.specularMaxAccumulatedFrameNum;
         defaults.diffuseMaxFastAccumulatedFrameNum = m_RelaxSettings.diffuseMaxFastAccumulatedFrameNum;
         defaults.specularMaxFastAccumulatedFrameNum = m_RelaxSettings.specularMaxFastAccumulatedFrameNum;
+        defaults.fastHistoryClampingSigmaScale = 1.5f;
 
         // Helps to mitigate fireflies emphasized by DLSS
         // defaults.enableAntiFirefly = m_DlssQuality != -1 && IsDlssEnabled(); // TODO: currently doesn't help in this case, but makes the image darker
@@ -620,9 +581,7 @@ public:
         defaults.maxAccumulatedFrameNum = m_ReblurSettings.maxAccumulatedFrameNum;
         defaults.maxFastAccumulatedFrameNum = m_ReblurSettings.maxFastAccumulatedFrameNum;
         defaults.maxStabilizedFrameNum = m_ReblurSettings.maxStabilizedFrameNum;
-
-        // Helps to mitigate fireflies emphasized by DLSS
-        defaults.enableAntiFirefly = m_DlssQuality != -1 && IsDlssEnabled();
+        defaults.fastHistoryClampingSigmaScale = 1.5f;
 
         return defaults;
     }
@@ -636,6 +595,10 @@ public:
         return sunDirection;
     }
 
+    inline uint2 GetSharcDims() const {
+        return 16 * uint2((m_RenderResolution / SHARC_DOWNSCALE + 15) / 16);
+    }
+
     bool Initialize(nri::GraphicsAPI graphicsAPI, bool) override;
     void LatencySleep(uint32_t frameIndex) override;
     void PrepareFrame(uint32_t frameIndex) override;
@@ -647,14 +610,14 @@ public:
     nri::Format CreateSwapChain();
     void CreateCommandBuffers();
     void CreatePipelineLayoutAndDescriptorPool();
-    void CreatePipelines();
+    void CreatePipelines(bool recreate);
     void CreateAccelerationStructures();
-    void CreateResources(nri::Format swapChainFormat);
+    void CreateResourcesAndDescriptors(nri::Format swapChainFormat);
     void CreateDescriptorSets();
-    void CreateTexture(std::vector<DescriptorDesc>& descriptorDescs, const char* debugName, nri::Format format, nri::Dim_t width, nri::Dim_t height, nri::Dim_t mipNum, nri::Dim_t arraySize, nri::TextureUsageBits usage, nri::AccessBits state);
-    void CreateBuffer(std::vector<DescriptorDesc>& descriptorDescs, const char* debugName, nri::Format format, uint64_t elements, uint32_t stride, nri::BufferUsageBits usage);
+    void CreateTexture(Texture texture, const char* debugName, nri::Format format, nri::Dim_t width, nri::Dim_t height, nri::Dim_t mipNum, nri::Dim_t arraySize, bool isReadOnly, nri::AccessBits initialAccess);
+    void CreateBuffer(Buffer buffer, const char* debugName, uint64_t elements, uint32_t stride, nri::BufferUsageBits usage);
     void UploadStaticData();
-    void UpdateConstantBuffer(uint32_t frameIndex, float resetHistoryFactor);
+    void UpdateConstantBuffer(uint32_t frameIndex, uint32_t maxAccumulatedFrameNum);
     void RestoreBindings(nri::CommandBuffer& commandBuffer);
     void GatherInstanceData();
     uint32_t BuildOptimizedTransitions(const TextureState* states, uint32_t stateNum, std::array<nri::TextureBarrierDesc, MAX_TEXTURE_TRANSITIONS_NUM>& transitions);
@@ -777,10 +740,10 @@ private:
         void Init(const NRIInterface& NRI, nri::Device* device, nri::QueueType type);
         void Destroy(const NRIInterface& NRI);
 
-        nri::CommandAllocator* commandAllocator;
-        nri::CommandBuffer* commandBuffer;
-        nri::Queue* commandQueue;
-        nri::Fence* fence;
+        nri::CommandAllocator* commandAllocator = nullptr;
+        nri::CommandBuffer* commandBuffer = nullptr;
+        nri::Queue* commandQueue = nullptr;
+        nri::Fence* fence = nullptr;
         uint64_t fenceValue = 0;
     };
 
@@ -832,8 +795,30 @@ private:
 
 
 Sample::~Sample() {
+
+#pragma region[ OmmSample specific ]
+    m_Scene.UnloadTextureData();
+    ReleaseMaskedGeometry();
+    ReleaseBakingResources();
+#pragma endregion
+
     if (NRI.HasCore()) {
+
         NRI.DeviceWaitIdle(m_Device);
+
+#pragma region[ OmmSample specific ]
+        m_OmmHelper.Destroy();
+        m_Profiler.Destroy();
+        m_OmmComputeContext.Destroy(NRI);
+        m_OmmGraphicsContext.Destroy(NRI);
+        for (auto& buffer : m_OmmAlphaGeometryBuffers)
+            NRI.DestroyBuffer(buffer);
+        m_OmmAlphaGeometryBuffers.clear();
+
+        for (auto& memory : m_OmmAlphaGeometryMemories)
+            NRI.FreeMemory(memory);
+        m_OmmAlphaGeometryMemories.clear();
+#pragma endregion
 
         for (QueuedFrame& queuedFrame : m_QueuedFrames) {
             NRI.DestroyCommandBuffer(queuedFrame.commandBuffer);
@@ -881,15 +866,6 @@ Sample::~Sample() {
 
     m_NRD.Destroy();
 
-#pragma region[ OmmSample specific ]
-    m_Profiler.Destroy();
-    ReleaseMaskedGeometry();
-    ReleaseBakingResources();
-    m_OmmHelper.Destroy();
-    m_OmmGraphicsContext.Destroy(NRI);
-    m_OmmComputeContext.Destroy(NRI);
-#pragma endregion
-
     DestroyImgui();
 
     nri::nriDestroyDevice(m_Device);
@@ -923,6 +899,7 @@ bool Sample::Initialize(nri::GraphicsAPI graphicsAPI, bool) {
 #pragma endregion
 
     NRI_ABORT_ON_FAILURE(nri::nriCreateDevice(deviceCreationDesc, m_Device));
+
     NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::CoreInterface), (nri::CoreInterface*)&NRI));
     NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::HelperInterface), (nri::HelperInterface*)&NRI));
     NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::RayTracingInterface), (nri::RayTracingInterface*)&NRI));
@@ -937,8 +914,8 @@ bool Sample::Initialize(nri::GraphicsAPI graphicsAPI, bool) {
         if (deviceDesc.graphicsAPI == nri::GraphicsAPI::D3D12 && deviceDesc.tiers.rayTracing < 3) {
             const char* errorMessage =
                 "D3D12_RAYTRACING_TIER_1_2 is required for Opacity Micromaps.\n\n"
-                "Please make sure GPU supports this tier and update driver to the latest.\n\n"
-                "Or disable DXR_OMM in CmakeLisit.txt to use NVAPI instead";
+                "Please make sure your GPU supports this tier and update the driver to the latest (NVGRD 595+).\n\n"
+                "Or disable DXR_OMM in CmakeLisit.txt to use NVAPI on NVGPU";
             MessageBoxA(nullptr, errorMessage, "DXR 1.2 Support Required", MB_OK | MB_ICONERROR);
             NRI_ABORT_ON_FALSE(false);
         }
@@ -996,7 +973,7 @@ bool Sample::Initialize(nri::GraphicsAPI graphicsAPI, bool) {
             upscalerDesc.type = upscalerType;
             upscalerDesc.mode = mode;
             upscalerDesc.flags = upscalerFlags;
-            upscalerDesc.preset = USE_DLSS_TNN ? 10 : 0;
+            upscalerDesc.preset = DLSS_PRESET;
             NRI_ABORT_ON_FAILURE(NRI.CreateUpscaler(*m_Device, upscalerDesc, m_DLSR));
 
             nri::UpscalerProps upscalerProps = {};
@@ -1032,8 +1009,6 @@ bool Sample::Initialize(nri::GraphicsAPI graphicsAPI, bool) {
             NRI.QueryVideoMemoryInfo(*m_Device, nri::MemoryLocation::DEVICE, videoMemoryInfo2);
 
             printf("DLSS-RR: allocated %.2f Mb\n", (videoMemoryInfo2.usageSize - videoMemoryInfo1.usageSize) / (1024.0f * 1024.0f));
-
-            m_Settings.RR = true;
         }
     }
 
@@ -1054,7 +1029,7 @@ bool Sample::Initialize(nri::GraphicsAPI graphicsAPI, bool) {
             {NRD_ID(RELAX_DIFFUSE_SPECULAR), nrd::Denoiser::RELAX_DIFFUSE_SPECULAR},
 #endif
 
-        // SIGMA
+            // SIGMA
             {NRD_ID(SIGMA_SHADOW), SIGMA_VARIANT},
 
             // REFERENCE
@@ -1101,58 +1076,68 @@ bool Sample::Initialize(nri::GraphicsAPI graphicsAPI, bool) {
 
     GenerateAnimatedCubes();
 
+    m_Pipelines.resize((size_t)Pipeline::MAX_NUM);
+    m_DescriptorSets.resize((size_t)DescriptorSet::MAX_NUM);
+    m_Buffers.resize((size_t)Buffer::MAX_NUM);
+    m_Textures.resize((size_t)Texture::BaseReadOnlyTexture + m_Scene.textures.size());
+    m_TextureStates.resize((size_t)Texture::BaseReadOnlyTexture); // no read-only textures
+    m_Descriptors.resize((size_t)Descriptor::BaseReadOnlyTexture + m_Scene.textures.size());
+    m_AccelerationStructures.resize((size_t)AccelerationStructure::BLAS_Other);
+
     nri::Format swapChainFormat = CreateSwapChain();
     CreateCommandBuffers();
     CreatePipelineLayoutAndDescriptorPool();
-    CreatePipelines();
+    CreatePipelines(false);
     CreateAccelerationStructures();
-    CreateResources(swapChainFormat);
+    CreateResourcesAndDescriptors(swapChainFormat);
     CreateDescriptorSets();
 
     UploadStaticData();
 
     m_Camera.Initialize(m_Scene.aabb.GetCenter(), m_Scene.aabb.vMin, CAMERA_RELATIVE);
 
-#pragma region[ Omm Sample specific ]
-    InitAlphaTestedGeometry();
-    m_OmmHelper.Initialize(m_Device, m_DisableOmmBlasBuild);
-    m_Profiler.Init(m_Device);
-    m_OmmGraphicsContext.Init(NRI, m_Device, nri::QueueType::GRAPHICS);
-    m_OmmComputeContext.Init(NRI, m_Device, nri::QueueType::COMPUTE);
+    m_SettingsDefault = m_Settings;
+    m_ShowValidationOverlay = m_DebugNRD;
 
+#pragma region[ OmmSample specific ]
+    {
+        InitAlphaTestedGeometry();
+        m_OmmHelper.Initialize(m_Device, m_DisableOmmBlasBuild);
+        m_Profiler.Init(m_Device);
+        m_OmmGraphicsContext.Init(NRI, m_Device, nri::QueueType::GRAPHICS);
+        m_OmmComputeContext.Init(NRI, m_Device, nri::QueueType::COMPUTE);
 
-    size_t sceneBeginNameOffset = m_SceneFile.find_last_of("/");
-    sceneBeginNameOffset = sceneBeginNameOffset == std::string::npos ? 0 : ++sceneBeginNameOffset;
-    size_t sceneEndNameOffset = m_SceneFile.find_last_of(".");
-    sceneEndNameOffset = sceneEndNameOffset == std::string::npos ? m_SceneFile.length() : sceneEndNameOffset;
-    m_SceneName = m_SceneFile.substr(sceneBeginNameOffset, sceneEndNameOffset - sceneBeginNameOffset);
+        size_t sceneBeginNameOffset = m_SceneFile.find_last_of("/");
+        sceneBeginNameOffset = sceneBeginNameOffset == std::string::npos ? 0 : ++sceneBeginNameOffset;
+        size_t sceneEndNameOffset = m_SceneFile.find_last_of(".");
+        sceneEndNameOffset = sceneEndNameOffset == std::string::npos ? m_SceneFile.length() : sceneEndNameOffset;
+        m_SceneName = m_SceneFile.substr(sceneBeginNameOffset, sceneEndNameOffset - sceneBeginNameOffset);
 
-    float3 cameraInitialPos = m_Scene.aabb.GetCenter();
-    float3 lookAtPos = m_Scene.aabb.vMin;
-    if (m_SceneFile.find("BistroExterior") != std::string::npos) {
-        cameraInitialPos = float3(49.545f, -38.352f, 6.916f);
-        float3 realLookAtPos = float3(41.304f, -26.487f, 4.805f);
-        float3 hackedDir = realLookAtPos - cameraInitialPos;
-        hackedDir = float3(hackedDir.y, -hackedDir.x, hackedDir.z);
-        lookAtPos = cameraInitialPos + hackedDir;
-    }
-    m_Camera.Initialize(cameraInitialPos, lookAtPos, CAMERA_RELATIVE);
+        float3 cameraInitialPos = m_Scene.aabb.GetCenter();
+        float3 lookAtPos = m_Scene.aabb.vMin;
+        if (m_SceneFile.find("BistroExterior") != std::string::npos) {
+            cameraInitialPos = float3(49.545f, -38.352f, 6.916f);
+            float3 realLookAtPos = float3(41.304f, -26.487f, 4.805f);
+            float3 hackedDir = realLookAtPos - cameraInitialPos;
+            hackedDir = float3(hackedDir.y, -hackedDir.x, hackedDir.z);
+            lookAtPos = cameraInitialPos + hackedDir;
+            m_Settings.exposure = 18.0f;
+        }
+        m_Camera.Initialize(cameraInitialPos, lookAtPos, CAMERA_RELATIVE);
 
-    if (NRI.GetDeviceDesc(*m_Device).graphicsAPI == nri::GraphicsAPI::D3D12) {
-        std::string windowTitle = std::string(glfwGetWindowTitle(m_Window));
+        if (NRI.GetDeviceDesc(*m_Device).graphicsAPI == nri::GraphicsAPI::D3D12) {
+            std::string windowTitle = std::string(glfwGetWindowTitle(m_Window));
 #if DXR_OMM
-        windowTitle += " [DXR 1.2]";
+            windowTitle += " [DXR 1.2]";
 #else
-        windowTitle += " [NVAPI]";
+            windowTitle += " [NVAPI]";
 #endif
-        glfwSetWindowTitle(m_Window, windowTitle.c_str());
+            glfwSetWindowTitle(m_Window, windowTitle.c_str());
+        }
     }
 #pragma endregion
 
     m_Scene.UnloadGeometryData();
-
-    m_SettingsDefault = m_Settings;
-    m_ShowValidationOverlay = m_DebugNRD;
 
     nri::VideoMemoryInfo videoMemoryInfo = {};
     NRI.QueryVideoMemoryInfo(*m_Device, nri::MemoryLocation::DEVICE, videoMemoryInfo);
@@ -1169,9 +1154,9 @@ void Sample::OmmNriContext::Init(const NRIInterface& NRI, nri::Device* device, n
 }
 
 void Sample::OmmNriContext::Destroy(const NRIInterface& NRI) {
-    NRI.DestroyFence(fence);
-    NRI.DestroyCommandBuffer(commandBuffer);
-    NRI.DestroyCommandAllocator(commandAllocator);
+    if(fence) NRI.DestroyFence(fence);
+    if(commandBuffer) NRI.DestroyCommandBuffer(commandBuffer);
+    if(commandAllocator) NRI.DestroyCommandAllocator(commandAllocator);
 }
 
 void BindBuffersToMemory(NRIInterface& nri, nri::Device* device, nri::Buffer** buffers, size_t count, std::vector<nri::Memory*>& memories, nri::MemoryLocation location) {
@@ -1261,7 +1246,7 @@ void Sample::InitAlphaTestedGeometry() {
     uint32_t storageAlignment = NRI.GetDeviceDesc(*m_Device).memoryAlignment.bufferShaderResourceOffset;
     uint32_t bufferAlignment = storageAlignment;
 
-    nri::Texture** materialTextures = m_Textures.data() + (size_t)Texture::MaterialTextures;
+    nri::Texture** materialTextures = m_Textures.data() + (size_t)Texture::BaseReadOnlyTexture;
     for (size_t i = 0; i < alphaInstances.size(); ++i) {
         const utils::Instance& instance = m_Scene.instances[alphaInstances[i]];
         const utils::Mesh& mesh = m_Scene.meshes[instance.meshInstanceIndex];
@@ -2198,21 +2183,6 @@ void Sample::AppendOmmImguiSettings() {
     ImGui::PushID("VISIBILITY MASKS");
     {
         if (isUnfolded) {
-            if (NRI.GetDeviceDesc(*m_Device).graphicsAPI == nri::GraphicsAPI::D3D12) {
-#if DXR_OMM
-                ImGui::Text("API: DXR");
-                if (ImGui::BeginItemTooltip()) {
-                    ImGui::Text("OMMs are built using DXR 1.2 API");
-                    ImGui::EndTooltip();
-                }
-#else
-                ImGui::Text("API: NvAPI");
-                if (ImGui::BeginItemTooltip()) {
-                    ImGui::Text("OMMs are built using NvAPI");
-                    ImGui::EndTooltip();
-                }
-#endif
-            }
             ImGui::Checkbox("Enable OMMs", &m_EnableOmm);
             ImGui::SameLine();
             ImGui::Text("[Masked Geometry Num: %llu]", m_MaskedBlasses.size());

@@ -25,7 +25,6 @@ NRI_FORMAT("unknown") NRI_RESOURCE( RWTexture2D<float4>, gOut_ComposedSpec_ViewZ
 void main( int2 pixelPos : SV_DispatchThreadId )
 {
     float2 pixelUv = float2( pixelPos + 0.5 ) * gInvRectSize;
-    float2 sampleUv = pixelUv + gJitter;
 
     // Do not generate NANs for unused threads
     if( pixelUv.x > 1.0 || pixelUv.y > 1.0 )
@@ -64,15 +63,14 @@ void main( int2 pixelPos : SV_DispatchThreadId )
     #endif
 
     float3 Ldirect = gIn_DirectLighting[ pixelPos ];
-        Ldirect = Ldirect * shadow + Lemi;
+    Ldirect = Ldirect * shadow + Lemi;
 
     // G-buffer
     float3 albedo, Rf0;
     float4 baseColorMetalness = gIn_BaseColor_Metalness[ pixelPos ];
     BRDF::ConvertBaseColorMetalnessToAlbedoRf0( baseColorMetalness.xyz, baseColorMetalness.w, albedo, Rf0 );
 
-    float3 Xv = Geometry::ReconstructViewPosition( sampleUv, gCameraFrustum, viewZ, gOrthoMode );
-    float3 X = Geometry::AffineTransform( gViewToWorld, Xv );
+    float3 Xv = Geometry::ReconstructViewPosition( pixelUv, gCameraFrustum, viewZ, gOrthoMode );
     float3 V = gOrthoMode == 0 ? normalize( Geometry::RotateVector( gViewToWorld, 0 - Xv ) ) : gViewDirection.xyz;
 
     // Sample NRD outputs
@@ -95,36 +93,33 @@ void main( int2 pixelPos : SV_DispatchThreadId )
             specSg = RELAX_BackEnd_UnpackSh( spec, spec1 );
         }
 
-        if( gResolve && pixelUv.x >= gSeparator )
-        {
-            // ( Optional ) replace "roughness" with "roughnessAA"
-            roughness = NRD_SG_ExtractRoughnessAA( specSg );
+        // Regain macro-details
+        diff.xyz = NRD_SG_ResolveDiffuse( diffSg, N, V, roughness ); // or NRD_SH_ResolveDiffuse( diffSg, N )
+        spec.xyz = NRD_SG_ResolveSpecular( specSg, N, V, roughness );
 
-            // Regain macro-details
-            diff.xyz = NRD_SG_ResolveDiffuse( diffSg, N ); // or NRD_SH_ResolveDiffuse( diffSg, N )
-            spec.xyz = NRD_SG_ResolveSpecular( specSg, N, V, roughness );
+        // Regain micro-details & jittering // TODO: preload N and Z into SMEM
+        float3 Ne = NRD_FrontEnd_UnpackNormalAndRoughness( gIn_Normal_Roughness[ pixelPos + int2(  1,  0 ) ] ).xyz;
+        float3 Nw = NRD_FrontEnd_UnpackNormalAndRoughness( gIn_Normal_Roughness[ pixelPos + int2( -1,  0 ) ] ).xyz;
+        float3 Nn = NRD_FrontEnd_UnpackNormalAndRoughness( gIn_Normal_Roughness[ pixelPos + int2(  0,  1 ) ] ).xyz;
+        float3 Ns = NRD_FrontEnd_UnpackNormalAndRoughness( gIn_Normal_Roughness[ pixelPos + int2(  0, -1 ) ] ).xyz;
 
-            // Regain micro-details & jittering // TODO: preload N and Z into SMEM
-            float3 Ne = NRD_FrontEnd_UnpackNormalAndRoughness( gIn_Normal_Roughness[ pixelPos + int2(  1,  0 ) ] ).xyz;
-            float3 Nw = NRD_FrontEnd_UnpackNormalAndRoughness( gIn_Normal_Roughness[ pixelPos + int2( -1,  0 ) ] ).xyz;
-            float3 Nn = NRD_FrontEnd_UnpackNormalAndRoughness( gIn_Normal_Roughness[ pixelPos + int2(  0,  1 ) ] ).xyz;
-            float3 Ns = NRD_FrontEnd_UnpackNormalAndRoughness( gIn_Normal_Roughness[ pixelPos + int2(  0, -1 ) ] ).xyz;
+        float Ze = gIn_ViewZ[ pixelPos + int2(  1,  0 ) ];
+        float Zw = gIn_ViewZ[ pixelPos + int2( -1,  0 ) ];
+        float Zn = gIn_ViewZ[ pixelPos + int2(  0,  1 ) ];
+        float Zs = gIn_ViewZ[ pixelPos + int2(  0, -1 ) ];
 
-            float Ze = gIn_ViewZ[ pixelPos + int2(  1,  0 ) ];
-            float Zw = gIn_ViewZ[ pixelPos + int2( -1,  0 ) ];
-            float Zn = gIn_ViewZ[ pixelPos + int2(  0,  1 ) ];
-            float Zs = gIn_ViewZ[ pixelPos + int2(  0, -1 ) ];
+        float2 scale = NRD_SG_ReJitter( diffSg, specSg, V, roughness, viewZ, Ze, Zw, Zn, Zs, N, Ne, Nw, Nn, Ns );
 
-            float2 scale = NRD_SG_ReJitter( diffSg, specSg, Rf0, V, roughness, viewZ, Ze, Zw, Zn, Zs, N, Ne, Nw, Nn, Ns );
+        diff.xyz *= scale.x;
+        spec.xyz *= scale.y;
 
-            diff.xyz *= scale.x;
-            spec.xyz *= scale.y;
-        }
-        else
+        // ( Optional ) Unresolved
+        if( !gResolve || pixelUv.x < gSeparator )
         {
             diff.xyz = NRD_SG_ExtractColor( diffSg );
             spec.xyz = NRD_SG_ExtractColor( specSg );
         }
+
     // Decode NORMAL mode outputs
     #else
         if( gDenoiserType == DENOISER_RELAX )
@@ -155,10 +150,10 @@ void main( int2 pixelPos : SV_DispatchThreadId )
     float3 Lspec = spec.xyz * specFactor;
 
     // Apply PSR throughput ( primary surface material before replacement )
-        float3 psrThroughput = gIn_PsrThroughput[ pixelPos ];
-        Ldiff *= psrThroughput;
-        Lspec *= psrThroughput;
-        Ldirect *= psrThroughput;
+    float3 psrThroughput = gIn_PsrThroughput[ pixelPos ];
+    Ldiff *= psrThroughput;
+    Lspec *= psrThroughput;
+    Ldirect *= psrThroughput;
 
     // IMPORTANT: we store diffuse and specular separately to be able to use the reprojection trick. Let's assume that direct lighting can always be reprojected as diffuse
     Ldiff += Ldirect;

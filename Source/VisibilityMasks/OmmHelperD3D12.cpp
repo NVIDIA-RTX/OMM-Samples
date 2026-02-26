@@ -9,22 +9,9 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 */
 
 #include "OmmHelper.h"
+#include <cassert>
 
 namespace ommhelper {
-inline ID3D12Device5* OpacityMicroMapsHelper::GetD3D12Device5() {
-    ID3D12Device* d3d12Device = (ID3D12Device*)NRI.GetDeviceNativeObject(m_Device);
-    if (!d3d12Device) {
-        printf("[FAILED] ID3D12Device* d3d12Device = NRI.GetDeviceNativeObject(*m_Device)");
-        std::abort();
-    }
-    ID3D12Device5* d3d12Device5 = nullptr;
-    if (d3d12Device->QueryInterface(IID_PPV_ARGS(&d3d12Device5)) != S_OK) {
-        printf("[FAILED] d3d12Device->QueryInterface(IID_PPV_ARGS(&d3d12Device5))");
-        std::abort();
-    }
-    return d3d12Device5;
-}
-
 inline ID3D12GraphicsCommandList4* OpacityMicroMapsHelper::GetD3D12GraphicsCommandList4(nri::CommandBuffer* commandBuffer) {
     ID3D12GraphicsCommandList4* commandList = nullptr;
     {
@@ -38,6 +25,21 @@ inline ID3D12GraphicsCommandList4* OpacityMicroMapsHelper::GetD3D12GraphicsComma
 }
 
 void OpacityMicroMapsHelper::InitializeD3D12() {
+
+    ID3D12Device* d3d12Device = (ID3D12Device*)NRI.GetDeviceNativeObject(m_Device);
+    if (!d3d12Device) {
+        printf("[FAILED] ID3D12Device* d3d12Device = NRI.GetDeviceNativeObject(*m_Device)");
+        std::abort();
+    }
+
+    ID3D12Device5* d3d12Device5 = nullptr;
+    if (d3d12Device->QueryInterface(IID_PPV_ARGS(&d3d12Device5)) != S_OK) {
+        printf("[FAILED] d3d12Device->QueryInterface(IID_PPV_ARGS(&d3d12Device5))");
+        std::abort();
+    }
+
+    m_Device5 = d3d12Device5;
+
 #if !DXR_OMM
     _NvAPI_Status nvResult = NvAPI_Initialize();
     if (nvResult != NVAPI_OK) {
@@ -48,7 +50,7 @@ void OpacityMicroMapsHelper::InitializeD3D12() {
     _NVAPI_D3D12_SET_CREATE_PIPELINE_STATE_OPTIONS_PARAMS_V1 createPsoParams = {};
     createPsoParams.version = NVAPI_D3D12_SET_CREATE_PIPELINE_STATE_OPTIONS_PARAMS_VER;
     createPsoParams.flags = NVAPI_D3D12_PIPELINE_CREATION_STATE_FLAGS_ENABLE_OMM_SUPPORT;
-    nvResult = NvAPI_D3D12_SetCreatePipelineStateOptions(GetD3D12Device5(), &createPsoParams);
+    nvResult = NvAPI_D3D12_SetCreatePipelineStateOptions(m_Device5, &createPsoParams);
     if (nvResult != NVAPI_OK) {
         printf("[FAIL]: NvAPI_D3D12_SetCreatePipelineStateOptions\n");
         std::abort();
@@ -91,8 +93,8 @@ inline D3D12_RAYTRACING_OPACITY_MICROMAP_ARRAY_DESC FillOmmArrayDesc(MaskedGeome
     desc.NumOmmHistogramEntries = inputs.descArrayHistogramNum;
     desc.pOmmHistogram = (D3D12_RAYTRACING_OPACITY_MICROMAP_HISTOGRAM_ENTRY*)inputs.descArrayHistogram;
 
-    desc.InputBuffer = ommArrayData ? ommArrayData->GetGPUVirtualAddress() + ommArrayDataOffset : 128;              // has to be non-zero on prebuild
-    desc.PerOmmDescs.StartAddress = ommDescArray ? ommDescArray->GetGPUVirtualAddress() + ommDescArrayOffset : 128; // has to be non-zero on prebuild
+    desc.InputBuffer = ommArrayData ? ommArrayData->GetGPUVirtualAddress() + ommArrayDataOffset : 0;
+    desc.PerOmmDescs.StartAddress = ommDescArray ? ommDescArray->GetGPUVirtualAddress() + ommDescArrayOffset : 0;
     desc.PerOmmDescs.StrideInBytes = sizeof(D3D12_RAYTRACING_OPACITY_MICROMAP_DESC);
 
     return desc;
@@ -234,19 +236,18 @@ void OpacityMicroMapsHelper::ReleaseMemoryD3D12() {
 
 void OpacityMicroMapsHelper::AllocateMemoryD3D12(uint64_t size) {
     m_D3D12GeometryHeaps.reserve(16);
-    ID3D12Device5* device = GetD3D12Device5();
     ID3D12Heap*& newHeap = m_D3D12GeometryHeaps.emplace_back();
     D3D12_HEAP_DESC desc = {};
     desc.Properties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
     desc.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
     desc.SizeInBytes = size > m_DefaultHeapSize ? size : m_DefaultHeapSize;
     desc.SizeInBytes = m_D3D12ScratchBuffer ? desc.SizeInBytes : desc.SizeInBytes + m_SctrachSize;
-    device->CreateHeap(&desc, IID_PPV_ARGS(&newHeap));
+    m_Device5->CreateHeap(&desc, IID_PPV_ARGS(&newHeap));
     m_CurrentHeapOffset = 0;
 
     if (!m_D3D12ScratchBuffer) {
         D3D12_RESOURCE_DESC resourceDesc = InitBufferResourceDesc(m_SctrachSize, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-        GetD3D12Device5()->CreatePlacedResource(m_D3D12GeometryHeaps.back(), 0, &resourceDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&m_D3D12ScratchBuffer));
+        m_Device5->CreatePlacedResource(m_D3D12GeometryHeaps.back(), 0, &resourceDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&m_D3D12ScratchBuffer));
         m_CurrentHeapOffset += Align(m_SctrachSize, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT);
     }
 }
@@ -266,7 +267,7 @@ void OpacityMicroMapsHelper::BindResourceToMemoryD3D12(ID3D12Resource*& resource
 #endif
 
     D3D12_RESOURCE_DESC resourceDesc = InitBufferResourceDesc(size, resourceFlags);
-    GetD3D12Device5()->CreatePlacedResource(heap, m_CurrentHeapOffset, &resourceDesc, initialState, nullptr, IID_PPV_ARGS(&resource));
+    m_Device5->CreatePlacedResource(heap, m_CurrentHeapOffset, &resourceDesc, initialState, nullptr, IID_PPV_ARGS(&resource));
     m_CurrentHeapOffset += Align(size, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT);
 }
 
@@ -276,13 +277,17 @@ void OpacityMicroMapsHelper::GetPreBuildInfoD3D12(MaskedGeometryBuildDesc** queu
         { // get omm prebuild info
 #if DXR_OMM
             {
-                D3D12_RAYTRACING_OPACITY_MICROMAP_ARRAY_DESC ommDesc = FillOmmArrayDesc(desc.inputs, NULL, NULL);
+                ID3D12Resource* ommArrayData = (ID3D12Resource*)NRI.GetBufferNativeObject(desc.inputs.buffers[(uint32_t)OmmDataLayout::ArrayData].buffer);
+                ID3D12Resource* ommDescArray = (ID3D12Resource*)NRI.GetBufferNativeObject(desc.inputs.buffers[(uint32_t)OmmDataLayout::DescArray].buffer);
+
+                D3D12_RAYTRACING_OPACITY_MICROMAP_ARRAY_DESC ommDesc = FillOmmArrayDesc(desc.inputs, ommArrayData, ommDescArray);
                 D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS vmInput = FillDefaultOmmArrayInputsDesc();
                 vmInput.pOpacityMicromapArrayDesc = &ommDesc;
 
                 D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO ommPrebuildInfo = {};
                 // Known issue in DXR 1.2: getting debug layer alignment error for an input buffer, which doesn't even get dereferenced on prebuild call.
-                GetD3D12Device5()->GetRaytracingAccelerationStructurePrebuildInfo(&vmInput, &ommPrebuildInfo);
+                assert((vmInput.pOpacityMicromapArrayDesc->InputBuffer % D3D12_RAYTRACING_OPACITY_MICROMAP_ARRAY_BYTE_ALIGNMENT) == 0);
+                m_Device5->GetRaytracingAccelerationStructurePrebuildInfo(&vmInput, &ommPrebuildInfo);
                 desc.prebuildInfo.ommArraySize = ommPrebuildInfo.ResultDataMaxSizeInBytes;
                 desc.prebuildInfo.maxScratchDataSize = ommPrebuildInfo.ScratchDataSizeInBytes;
             }
@@ -294,7 +299,7 @@ void OpacityMicroMapsHelper::GetPreBuildInfoD3D12(MaskedGeometryBuildDesc** queu
                 ommGetPrebuildInfoParams.pDesc = &vmInput;
                 ommGetPrebuildInfoParams.pInfo = &ommPrebuildInfo;
                 ommGetPrebuildInfoParams.version = NVAPI_GET_RAYTRACING_OPACITY_MICROMAP_ARRAY_PREBUILD_INFO_PARAMS_VER;
-                _NvAPI_Status nvResult = NvAPI_D3D12_GetRaytracingOpacityMicromapArrayPrebuildInfo(GetD3D12Device5(), &ommGetPrebuildInfoParams);
+                _NvAPI_Status nvResult = NvAPI_D3D12_GetRaytracingOpacityMicromapArrayPrebuildInfo(m_Device5, &ommGetPrebuildInfoParams);
                 if (nvResult != NVAPI_OK) {
                     printf("[FAIL]: NvAPI_D3D12_GetRaytracingOpacityMicromapArrayPrebuildInfo\n");
                     std::abort();
@@ -320,7 +325,7 @@ void OpacityMicroMapsHelper::GetPreBuildInfoD3D12(MaskedGeometryBuildDesc** queu
                 D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputDesc = FillDefaultBlasInputsDesc();
                 inputDesc.pGeometryDescs = &geometryDesc;
 
-                GetD3D12Device5()->GetRaytracingAccelerationStructurePrebuildInfo(&inputDesc, &blasPrebuildInfo);
+                m_Device5->GetRaytracingAccelerationStructurePrebuildInfo(&inputDesc, &blasPrebuildInfo);
             }
 #else
             {
@@ -336,7 +341,7 @@ void OpacityMicroMapsHelper::GetPreBuildInfoD3D12(MaskedGeometryBuildDesc** queu
                 blaskGetPrebuildInfoParams.version = NVAPI_GET_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO_EX_PARAMS_VER;
 
                 NvAPI_Status nvapiStatus = NVAPI_OK;
-                nvapiStatus = NvAPI_D3D12_GetRaytracingAccelerationStructurePrebuildInfoEx(GetD3D12Device5(), &blaskGetPrebuildInfoParams);
+                nvapiStatus = NvAPI_D3D12_GetRaytracingAccelerationStructurePrebuildInfoEx(m_Device5, &blaskGetPrebuildInfoParams);
                 if (nvapiStatus != NVAPI_OK) {
                     printf("[FAIL]: NvAPI_D3D12_GetRaytracingAccelerationStructurePrebuildInfoEx\n");
                     std::abort();
@@ -371,7 +376,11 @@ void OpacityMicroMapsHelper::BuildOmmArrayD3D12(MaskedGeometryBuildDesc& desc, n
         vmArrayDesc.ScratchAccelerationStructureData = m_D3D12ScratchBuffer->GetGPUVirtualAddress();
 
         D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC info = {};
-        GetD3D12GraphicsCommandList4(commandBuffer)->BuildRaytracingAccelerationStructure(&vmArrayDesc, 0, &info);
+        // Known issue in DXR 1.2: getting debug layer alignment error for an input buffer. Error is gone if D3D12_RAYTRACING_OPACITY_MICROMAP_ARRAY_BYTE_ALIGNMENT == 256
+        assert(vmArrayDesc.Inputs.pOpacityMicromapArrayDesc->InputBuffer % D3D12_RAYTRACING_OPACITY_MICROMAP_ARRAY_BYTE_ALIGNMENT == 0);
+        ID3D12GraphicsCommandList4* commandList = GetD3D12GraphicsCommandList4(commandBuffer);
+        commandList->BuildRaytracingAccelerationStructure(&vmArrayDesc, 0, &info);
+        commandList->Release();
     }
 #else
     {
@@ -388,16 +397,20 @@ void OpacityMicroMapsHelper::BuildOmmArrayD3D12(MaskedGeometryBuildDesc& desc, n
         buildVmParams.pDesc = &vmArrayDesc;
         buildVmParams.version = NVAPI_BUILD_RAYTRACING_OPACITY_MICROMAP_ARRAY_PARAMS_VER;
 
-        NvAPI_Status nvapiStatus = NvAPI_D3D12_BuildRaytracingOpacityMicromapArray(GetD3D12GraphicsCommandList4(commandBuffer), &buildVmParams);
+        ID3D12GraphicsCommandList4* commandList = GetD3D12GraphicsCommandList4(commandBuffer);
+        NvAPI_Status nvapiStatus = NvAPI_D3D12_BuildRaytracingOpacityMicromapArray(commandList, &buildVmParams);
         if (nvapiStatus != NVAPI_OK) {
             printf("[FAIL]: NvAPI_D3D12_BuildRaytracingOpacityMicromapArray\n");
             std::abort();
         }
+        commandList->Release();
     }
 #endif
 
     D3D12_RESOURCE_BARRIER barriers[] = {InitUavBarrier(m_D3D12ScratchBuffer)};
-    GetD3D12GraphicsCommandList4(commandBuffer)->ResourceBarrier(_countof(barriers), barriers);
+    ID3D12GraphicsCommandList4* commandList = GetD3D12GraphicsCommandList4(commandBuffer);
+    commandList->ResourceBarrier(_countof(barriers), barriers);
+    commandList->Release();
 
     nri::BufferD3D12Desc wrappedBufferDesc = {ommArrayBuffer, 0};
     NRI.CreateBufferD3D12(*m_Device, wrappedBufferDesc, desc.outputs.ommArray);
@@ -432,8 +445,10 @@ void OpacityMicroMapsHelper::BuildBlasD3D12(MaskedGeometryBuildDesc& desc, nri::
         vmArrayDesc.Inputs = inputDesc;
         vmArrayDesc.ScratchAccelerationStructureData = m_D3D12ScratchBuffer->GetGPUVirtualAddress();
 
+        ID3D12GraphicsCommandList4* commandList = GetD3D12GraphicsCommandList4(commandBuffer);
         D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC info = {};
-        GetD3D12GraphicsCommandList4(commandBuffer)->BuildRaytracingAccelerationStructure(&vmArrayDesc, 0, &info);
+        commandList->BuildRaytracingAccelerationStructure(&vmArrayDesc, 0, &info);
+        commandList->Release();
     }
 #else
     {
@@ -452,15 +467,20 @@ void OpacityMicroMapsHelper::BuildBlasD3D12(MaskedGeometryBuildDesc& desc, nri::
         asExParams.pDesc = &asDesc;
         asExParams.version = NVAPI_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_EX_PARAMS_VER;
 
-        NvAPI_Status nvapiStatus = NvAPI_D3D12_BuildRaytracingAccelerationStructureEx(GetD3D12GraphicsCommandList4(commandBuffer), &asExParams);
+        ID3D12GraphicsCommandList4* commandList = GetD3D12GraphicsCommandList4(commandBuffer);
+        NvAPI_Status nvapiStatus = NvAPI_D3D12_BuildRaytracingAccelerationStructureEx(commandList, &asExParams);
         if (nvapiStatus != NVAPI_OK) {
             printf("[FAIL]: NvAPI_D3D12_BuildRaytracingAccelerationStructureEx\n");
             std::abort();
         }
+        commandList->Release();
     }
 #endif
     D3D12_RESOURCE_BARRIER barriers[] = {InitUavBarrier(m_D3D12ScratchBuffer)};
-    GetD3D12GraphicsCommandList4(commandBuffer)->ResourceBarrier(_countof(barriers), barriers);
+
+    ID3D12GraphicsCommandList4* commandList = GetD3D12GraphicsCommandList4(commandBuffer);
+    commandList->ResourceBarrier(_countof(barriers), barriers);
+    commandList->Release();
 
     nri::AccelerationStructureD3D12Desc asDesc = {};
     asDesc.d3d12Resource = blas;

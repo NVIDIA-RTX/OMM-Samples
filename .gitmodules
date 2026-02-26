@@ -1,7 +1,12 @@
+[submodule "External/NGX"]
+	path = External/NGX
+	url = https://github.com/NVIDIA/DLSS.git
+	branch = main
+	update = merge
 [submodule "External/Opacity-MicroMap-SDK"]
 	path = External/Opacity-MicroMap-SDK
 	url = https://github.com/NVIDIAGameWorks/Opacity-MicroMap-SDK.git
-	branch = main
+	branch = main-minimal
 [submodule "External/NRD"]
 	path = External/NRD
 	url = https://github.com/NVIDIA-RTX/NRD.git
@@ -9,4 +14,3 @@
 [submodule "External/NRIFramework"]
 	path = External/NRIFramework
 	url = https://github.com/NVIDIA-RTX/NRIFramework.git
-	branch = main

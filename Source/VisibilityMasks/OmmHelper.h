@@ -1,4 +1,4 @@
-﻿/*
+/*
 Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 
 NVIDIA CORPORATION and its licensors retain all intellectual property
@@ -276,7 +276,6 @@ private:
     void BuildMaskedGeometryD3D12(MaskedGeometryBuildDesc** queue, const size_t count, nri::CommandBuffer* commandBuffer);
     void BuildOmmArrayD3D12(MaskedGeometryBuildDesc& desc, nri::CommandBuffer* commandBuffer);
     void BuildBlasD3D12(MaskedGeometryBuildDesc& desc, nri::CommandBuffer* commandBuffer);
-    ID3D12Device5* GetD3D12Device5();
     ID3D12GraphicsCommandList4* GetD3D12GraphicsCommandList4(nri::CommandBuffer* commandBuffer);
 
     // VK:
@@ -290,6 +289,7 @@ private:
     void BuildOmmArrayVK(MaskedGeometryBuildDesc& desc, nri::CommandBuffer* commandBuffer);
     void BuildBlasVK(MaskedGeometryBuildDesc& desc, nri::CommandBuffer* commandBuffer);
     void DestroyOmmArrayVK(nri::Buffer* ommArray);
+    void DestroyBlasVK(nri::AccelerationStructure* blas);
     VkDevice GetVkDevice();
 
 private:
@@ -302,6 +302,7 @@ private:
     // D3D12:
     std::vector<ID3D12Heap*> m_D3D12GeometryHeaps;
     ID3D12Resource* m_D3D12ScratchBuffer = nullptr;
+    ID3D12Device5* m_Device5 = nullptr;
 
     // VK:
     std::vector<VkDeviceMemory> m_VkMemories;

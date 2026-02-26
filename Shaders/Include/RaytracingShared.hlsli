@@ -97,14 +97,6 @@ struct GeometryProps
     uint instanceIndex;
     uint anyhitTriggered;
 
-    float3 GetXoffset( float3 offsetDir, float amount = PT_BOUNCE_RAY_OFFSET )
-    {
-        float viewZ = Geometry::AffineTransform( gWorldToView, X ).z;
-        amount *= gUnproject * lerp( abs( viewZ ), 1.0, abs( gOrthoMode ) );
-
-        return X + offsetDir * max( amount, 0.00001 );
-    }
-
     bool Has( uint flag )
     { return ( textureOffsetAndFlags & ( flag << FLAG_FIRST_BIT ) ) != 0; }
 
@@ -131,6 +123,14 @@ struct MaterialProps
     float metalness;
     float curvature;
 };
+
+float3 GetXoffset( float3 X, float3 offsetDir, float amount = PT_BOUNCE_RAY_OFFSET )
+{
+    float viewZ = Geometry::AffineTransform( gWorldToView, X ).z;
+    amount *= gUnproject * lerp( abs( viewZ ), 1.0, abs( gOrthoMode ) );
+
+    return X + offsetDir * amount;
+}
 
 float2 GetConeAngleFromAngularRadius( float mip, float tanConeAngle )
 {
@@ -245,7 +245,7 @@ float3 GetSamplingCoords( uint textureIndex, float2 uv, float mip, int mode )
         \
         /* Alpha test */ \
         uint baseTexture = ( instanceData.textureOffsetAndFlags & NON_FLAG_MASK ) + 0; \
-        float3 coords = GetSamplingCoords( baseTexture, uv, gAhsDynamicMipSelection ? mip : 0, MIP_VISIBILITY ); \
+        float3 coords = GetSamplingCoords( baseTexture, uv, mip, MIP_VISIBILITY ); \
         float alpha = gIn_Textures[ baseTexture ].SAMPLE( coords ).w; \
         \
         if( alpha > 0.5 ) \
@@ -448,11 +448,13 @@ MaterialProps GetMaterialProps( GeometryProps geometryProps )
     float3 N = gUseNormalMap ? Geometry::TransformLocalNormal( packedNormal, geometryProps.T, geometryProps.N ) : geometryProps.N;
     float3 T = geometryProps.T.xyz;
 
+    float3 Nlocal = Geometry::UnpackLocalNormal( packedNormal );
+    Nlocal.xy *= float( gUseNormalMap );
+
     // Estimate curvature
     float viewZ = Geometry::AffineTransform( gWorldToView, geometryProps.X ).z;
     float pixelSize = gUnproject * lerp( abs( viewZ ), 1.0, abs( gOrthoMode ) );
-    float localCurvature = length( Geometry::UnpackLocalNormal( packedNormal ).xy ) * float( gUseNormalMap );
-    localCurvature /= pixelSize;
+    float localCurvature = length( Nlocal.xy ) / pixelSize;
 
     // Emission
     coords = GetSamplingCoords( baseTexture + 3, geometryProps.uv, geometryProps.mip, MIP_VISIBILITY );
@@ -464,10 +466,12 @@ MaterialProps GetMaterialProps( GeometryProps geometryProps )
     if( geometryProps.Has( FLAG_FORCED_EMISSION ) )
     {
         Lemi = geometryProps.GetForcedEmissionColor( );
+        Lemi *= gEmissionIntensityCubes;
+
         baseColor = 0.0;
     }
-
-    Lemi *= gEmissionIntensity;
+    else
+        Lemi *= gEmissionIntensityLights;
 
     // Material overrides
     [flatten]
@@ -511,6 +515,9 @@ MaterialProps GetMaterialProps( GeometryProps geometryProps )
     metalness = lerp( metalness, 0.0, emissionLevel );
     roughness = lerp( roughness, 1.0, emissionLevel );
 
+    // TODO: roughness AA
+
+    // Output
     props.Lemi = Lemi;
     props.N = N;
     props.T = T;
@@ -518,6 +525,10 @@ MaterialProps GetMaterialProps( GeometryProps geometryProps )
     props.roughness = roughness;
     props.metalness = metalness;
     props.curvature = geometryProps.curvature + localCurvature;
+
+#if USE_WHITE_FURNACE
+    props.baseColor = 1.0;
+#endif
 
     return props;
 }
@@ -527,14 +538,14 @@ MaterialProps GetMaterialProps( GeometryProps geometryProps )
 #define SHADOW      0x02
 #define SSS         0x04
 
-float3 GetLighting( GeometryProps geometryProps, MaterialProps materialProps, uint flags, out float3 Xshadow )
+float3 GetLighting( GeometryProps geometryProps, MaterialProps materialProps, compiletime uint flags, out float3 Xshadow )
 {
     float3 lighting = 0.0;
 
     // Lighting
     Xshadow = geometryProps.X;
 
-    if( ( flags & LIGHTING ) != 0 )
+    if ( ( flags & LIGHTING ) != 0 )
     {
         float3 Csun = GetSunIntensity( gSunDirection.xyz );
         float3 Csky = GetSkyIntensity( -geometryProps.V );
@@ -605,7 +616,7 @@ float3 GetLighting( GeometryProps geometryProps, MaterialProps materialProps, ui
                 sssMaterial.scale = 0.4 / gUnitToMetersMultiplier; // TODO: units dependent! cm!
                 sssMaterial.g = 0.0;
 
-                float3 Xoffset = geometryProps.GetXoffset( geometryProps.N, PT_SHADOW_RAY_OFFSET );
+                float3 Xoffset = GetXoffset( geometryProps.X, geometryProps.N, PT_SHADOW_RAY_OFFSET );
                 float3x3 mLocalBasis = Geometry::GetBasis( geometryProps.N );
                 RTXCR_SubsurfaceInteraction sssGeometry = RTXCR_CreateSubsurfaceInteraction( Xoffset, mLocalBasis[ 2 ], mLocalBasis[ 0 ], mLocalBasis[ 1 ] );
 
@@ -646,9 +657,10 @@ float3 GetLighting( GeometryProps geometryProps, MaterialProps materialProps, ui
         rnd *= gTanSunAngularRadius;
 
         float3 sunDirection = normalize( gSunBasisX.xyz * rnd.x + gSunBasisY.xyz * rnd.y + gSunDirection.xyz );
+        float3 Xoffset = GetXoffset( geometryProps.X, sunDirection, PT_SHADOW_RAY_OFFSET );
         float2 mipAndCone = GetConeAngleFromAngularRadius( geometryProps.mip, gTanSunAngularRadius );
 
-        float hitT = CastVisibilityRay_AnyHit( Xshadow, sunDirection, 0.0, INF, mipAndCone, gWorldTlas, instanceInclusionMask, rayFlags );
+        float hitT = CastVisibilityRay_AnyHit( Xoffset, sunDirection, 0.0, INF, mipAndCone, gWorldTlas, instanceInclusionMask, rayFlags );
         lighting *= float( hitT == INF );
     }
 
@@ -707,7 +719,7 @@ float3 GenerateRayAndUpdateThroughput( inout GeometryProps geometryProps, inout 
         {
             float3 candidateRay = Geometry::RotateVectorInverse( mLocalBasis, candidateRayLocal );
             float2 mipAndCone = GetConeAngleFromRoughness( geometryProps.mip, isDiffuse ? 1.0 : materialProps.roughness );
-            float3 Xoffset = geometryProps.GetXoffset( geometryProps.N );
+            float3 Xoffset = GetXoffset( geometryProps.X, geometryProps.N );
 
             float distanceToLight = CastVisibilityRay_AnyHit( Xoffset, candidateRay, 0.0, INF, mipAndCone, gLightTlas, FLAG_NON_TRANSPARENT, PT_RAY_FLAGS );
             isEmissiveHit = distanceToLight != INF;
@@ -727,6 +739,7 @@ float3 GenerateRayAndUpdateThroughput( inout GeometryProps geometryProps, inout 
             emissiveHitNum++;
 
         // Save either the first ray or the last ray hitting an emissive
+        // TODO: the selection should be probabilistic and based on the intensity percentage across all hit candidates, currently emission intensity is uniform, so all candidates are equally "good"
         if( isEmissiveHit || sampleIndex == 0 )
             rayLocal = candidateRayLocal;
 
@@ -846,7 +859,7 @@ float GetDeltaEventRay( GeometryProps geometryProps, bool isReflection, float et
     float amount = geometryProps.Has( FLAG_TRANSPARENT ) ? PT_GLASS_RAY_OFFSET : PT_BOUNCE_RAY_OFFSET;
     float s = Math::Sign( dot( ray, geometryProps.N ) );
 
-    Xoffset = geometryProps.GetXoffset( geometryProps.N * s, amount );
+    Xoffset = GetXoffset( geometryProps.X, geometryProps.N * s, amount );
 
     return eta;
 }
@@ -895,7 +908,7 @@ float ReprojectIrradiance( bool isPrevFrame, bool isRefraction, Texture2D<float3
     float2 uv = Geometry::GetScreenUv( isPrevFrame ? gWorldToClipPrev : gWorldToClip, geometryProps.X, true ) - gJitter;
 
     float2 rescale = ( isPrevFrame ? gRectSizePrev : gRectSize ) * gInvRenderSize;
-    float4 data = texSpecViewZ.SampleLevel( gNearestSampler, uv * rescale, 0 );
+    float4 data = texSpecViewZ.SampleLevel( gNearestClamp, uv * rescale, 0 );
     float prevViewZ = abs( data.w ) / FP16_VIEWZ_SCALE;
 
     // Initial state
@@ -942,7 +955,7 @@ float ReprojectIrradiance( bool isPrevFrame, bool isRefraction, Texture2D<float3
         weight *= gPrevFrameConfidence; // see C++ code for details
 
     // Read data
-    Ldiff = texDiff.SampleLevel( gNearestSampler, uv * rescale, 0 );
+    Ldiff = texDiff.SampleLevel( gNearestClamp, uv * rescale, 0 );
     Lspec = data.xyz;
 
     // Avoid NANs

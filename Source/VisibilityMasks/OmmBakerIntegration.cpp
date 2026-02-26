@@ -222,14 +222,14 @@ BufferResource& OmmBakerGpuIntegration::GetBuffer(const ommGpuResource& resource
     }
 }
 
-nri::BufferViewType GetNriBufferViewType(ommGpuDescriptorType type) {
+nri::BufferView GetNriBufferViewType(ommGpuDescriptorType type) {
     switch (type) {
         case ommGpuDescriptorType_BufferRead:
-            return nri::BufferViewType::SHADER_RESOURCE;
+            return nri::BufferView::BUFFER;
         case ommGpuDescriptorType_RawBufferRead:
-            return nri::BufferViewType::SHADER_RESOURCE;
+            return nri::BufferView::BYTE_ADDRESS_BUFFER;
         case ommGpuDescriptorType_RawBufferWrite:
-            return nri::BufferViewType::SHADER_RESOURCE_STORAGE;
+            return nri::BufferView::BYTE_ADDRESS_BUFFER;
         case ommGpuDescriptorType_TextureRead:
         default:
             printf("[FAIL] Invalid BufferDescriptorType\n");
@@ -494,13 +494,13 @@ void OmmBakerGpuIntegration::CreateTextures(uint32_t pipelineNum) {
         resourceGrpoupDesc.memoryLocation = nri::MemoryLocation::DEVICE;
         NRI_ABORT_ON_FAILURE(NRI.AllocateAndBindMemory(*m_Device, resourceGrpoupDesc, &m_DebugTextureMemory));
 
-        nri::Texture2DViewDesc textureViewDesc = {};
-        textureViewDesc.viewType = nri::Texture2DViewType::COLOR_ATTACHMENT;
+        nri::TextureViewDesc textureViewDesc = {};
+        textureViewDesc.type = nri::TextureView::COLOR_ATTACHMENT;
         textureViewDesc.mipNum = 1;
         textureViewDesc.mipOffset = 0;
         textureViewDesc.format = m_DebugTexFormat;
         textureViewDesc.texture = m_DebugTexture;
-        NRI.CreateTexture2DView(textureViewDesc, m_DebugTextureDescriptor);
+        NRI.CreateTextureView(textureViewDesc, m_DebugTextureDescriptor);
     }
 }
 
@@ -678,7 +678,7 @@ void OmmBakerGpuIntegration::UpdateGlobalConstantBuffer() {
 
         m_ConstantBufferViews.resize((uint32_t)m_GeometryQueue.size());
         nri::BufferViewDesc constantBufferViewDesc = {};
-        constantBufferViewDesc.viewType = nri::BufferViewType::CONSTANT;
+        constantBufferViewDesc.type = nri::BufferView::CONSTANT_BUFFER;
         constantBufferViewDesc.buffer = m_ConstantBuffer;
         constantBufferViewDesc.size = m_ConstantBufferViewStride;
 
@@ -767,13 +767,13 @@ nri::Descriptor* OmmBakerGpuIntegration::GetDescriptor(const ommGpuResource& res
         bool isTexture = resource.stateNeeded == ommGpuDescriptorType_TextureRead;
         bool isRaw = (resource.stateNeeded == ommGpuDescriptorType_RawBufferRead) || (resource.stateNeeded == ommGpuDescriptorType_RawBufferWrite);
         if (isTexture) {
-            nri::Texture2DViewDesc texDesc = {};
+            nri::TextureViewDesc texDesc = {};
             texDesc.mipNum = 1;
             texDesc.mipOffset = nri::Dim_t(inputs.inTexture.mipOffset);
-            texDesc.viewType = nri::Texture2DViewType::SHADER_RESOURCE_2D;
+            texDesc.type = nri::TextureView::TEXTURE;
             texDesc.format = inputs.inTexture.format;
             texDesc.texture = inputs.inTexture.texture;
-            NRI_ABORT_ON_FAILURE(NRI.CreateTexture2DView(texDesc, descriptor));
+            NRI_ABORT_ON_FAILURE(NRI.CreateTextureView(texDesc, descriptor));
         } else {
             const BufferResource& buffer = GetBuffer(resource, geometryId);
             nri::BufferViewDesc bufferDesc = {};
@@ -781,7 +781,7 @@ nri::Descriptor* OmmBakerGpuIntegration::GetDescriptor(const ommGpuResource& res
             bufferDesc.offset = buffer.offset;
             bufferDesc.format = isRaw ? nri::Format::UNKNOWN : buffer.format;
             bufferDesc.size = buffer.size - buffer.offset;
-            bufferDesc.viewType = GetNriBufferViewType(resource.stateNeeded);
+            bufferDesc.type = GetNriBufferViewType(resource.stateNeeded);
             NRI_ABORT_ON_FAILURE(NRI.CreateBufferView(bufferDesc, descriptor));
         }
         m_NriDescriptors.insert(std::make_pair(key, descriptor));
@@ -1007,10 +1007,12 @@ void OmmBakerGpuIntegration::DispatchDrawIndexedIndirect(nri::CommandBuffer& com
         argBuffer.state = nri::AccessBits::ARGUMENT_BUFFER;
     }
 
-    nri::AttachmentsDesc frameBuffer = {};
-    frameBuffer.colors = &m_ColorDescriptorPerPipeline[desc.pipelineIndex];
-    frameBuffer.colorNum = m_ColorDescriptorPerPipeline[desc.pipelineIndex] ? 1 : 0;
-    const bool hasDebugTextureOutput = frameBuffer.colorNum > 0;
+    nri::RenderingDesc renderingDesc = {};
+    nri::AttachmentDesc attachmentDesc = {};
+    attachmentDesc.descriptor = m_ColorDescriptorPerPipeline[desc.pipelineIndex];
+    renderingDesc.colors = &attachmentDesc;
+    renderingDesc.colorNum = m_ColorDescriptorPerPipeline[desc.pipelineIndex] ? 1 : 0;
+    const bool hasDebugTextureOutput = renderingDesc.colorNum > 0;
 
     if (hasDebugTextureOutput && m_DebugTextureState != nri::AccessBits::COLOR_ATTACHMENT) { // perform debug frame buffer transition
         nri::TextureBarrierDesc textureBarrierDesc = {};
@@ -1032,7 +1034,7 @@ void OmmBakerGpuIntegration::DispatchDrawIndexedIndirect(nri::CommandBuffer& com
         m_DebugTextureState = nri::AccessBits::COLOR_ATTACHMENT;
     }
 
-    NRI.CmdBeginRendering(commandBuffer, frameBuffer);
+    NRI.CmdBeginRendering(commandBuffer, renderingDesc);
     {
         BufferResource& indexBuffer = GetBuffer(desc.indexBuffer, geometryId);
         NRI.CmdSetIndexBuffer(commandBuffer, *indexBuffer.buffer, desc.indexBufferOffset, nri::IndexType::UINT32);

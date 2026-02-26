@@ -76,6 +76,10 @@ void OpacityMicroMapsHelper::Destroy() {
     m_GpuBakerIntegration.Destroy();
     ommDestroyBaker(m_OmmCpuBaker);
     ReleaseGeometryMemory();
+
+    if(m_Device5)
+        m_Device5->Release();
+
 #if !DXR_OMM
     if (NRI.GetDeviceDesc(*m_Device).graphicsAPI == nri::GraphicsAPI::D3D12)
         NvAPI_Unload();
@@ -222,21 +226,23 @@ void OpacityMicroMapsHelper::ConvertUsageCountsToApiFormat(uint8_t* outFormatted
 }
 
 void OpacityMicroMapsHelper::DestroyMaskedGeometry(nri::AccelerationStructure* blas, nri::Buffer* ommArray) {
-    if (blas)
-        NRI.DestroyAccelerationStructure(blas);
-
     if (NRI.GetDeviceDesc(*m_Device).graphicsAPI == nri::GraphicsAPI::D3D12) {
         if (ommArray)
             NRI.DestroyBuffer(ommArray);
-    } else
-        DestroyOmmArrayVK(ommArray);
+    } else {
+        if (ommArray)
+            DestroyOmmArrayVK(ommArray);
+        if (blas)
+            DestroyBlasVK(blas);
+    }
+
+    if (blas)
+        NRI.DestroyAccelerationStructure(blas);
 }
 
 void OpacityMicroMapsHelper::ReleaseGeometryMemory() {
-    if (NRI.GetDeviceDesc(*m_Device).graphicsAPI == nri::GraphicsAPI::D3D12)
-        ReleaseMemoryD3D12();
-    else
-        ReleaseMemoryVK();
+    ReleaseMemoryD3D12();
+    ReleaseMemoryVK();
 }
 
 #pragma endregion

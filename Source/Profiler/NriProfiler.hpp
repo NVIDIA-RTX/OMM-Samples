@@ -100,8 +100,8 @@ private:
     const uint32_t m_QueryBufferSize = m_QueriesNum * sizeof(uint64_t);
     uint32_t m_CurrentTimestampID = uint32_t(-1);
     uint32_t m_CurrentFrameID = uint32_t(-1);
-    uint32_t m_BufferedFrameID;
-    uint32_t m_OldestBufferedFrameID;
+    uint32_t m_BufferedFrameID = 0;
+    uint32_t m_OldestBufferedFrameID = uint32_t(~0);
 };
 
 void Profiler::ResolveBufferedFrame()
@@ -270,11 +270,11 @@ void Profiler::EndTimestamp(ProfilerContext* ctx, uint32_t timestampID)
 void Profiler::Destroy()
 {
     for (auto& buffer : m_QueryBuffers)
-        m_NRI.DestroyBuffer(buffer);
+        if (buffer) m_NRI.DestroyBuffer(buffer);
     for (auto& pool : m_QueryPools)
-        m_NRI.DestroyQueryPool(pool);
+        if (pool) m_NRI.DestroyQueryPool(pool);
     for (auto& memory : m_Memories)
-        m_NRI.FreeMemory(memory);
+        if(memory) m_NRI.FreeMemory(memory);
     m_Memories.resize(0);
     m_Memories.shrink_to_fit();
     m_Events.resize(0);

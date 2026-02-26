@@ -46,6 +46,7 @@ struct VkInterface {
     DECLARE_VK_FUNC(CreateMicromapEXT);
     DECLARE_VK_FUNC(GetBufferDeviceAddress);
     DECLARE_VK_FUNC(CreateAccelerationStructureKHR);
+    DECLARE_VK_FUNC(DestroyAccelerationStructureKHR);
     DECLARE_VK_FUNC(GetAccelerationStructureDeviceAddressKHR);
     DECLARE_VK_FUNC(CmdPipelineBarrier);
     DECLARE_VK_FUNC(DestroyMicromapEXT);
@@ -90,6 +91,7 @@ void OpacityMicroMapsHelper::InitializeVK() {
 
         INIT_VK_FUNC(getDeviceProcAddr, vkDevice, GetAccelerationStructureBuildSizesKHR);
         INIT_VK_FUNC(getDeviceProcAddr, vkDevice, CreateAccelerationStructureKHR);
+        INIT_VK_FUNC(getDeviceProcAddr, vkDevice, DestroyAccelerationStructureKHR);
         INIT_VK_FUNC(getDeviceProcAddr, vkDevice, GetAccelerationStructureDeviceAddressKHR);
         INIT_VK_FUNC(getDeviceProcAddr, vkDevice, CmdBuildAccelerationStructuresKHR);
 
@@ -142,6 +144,11 @@ void OpacityMicroMapsHelper::DestroyOmmArrayVK(nri::Buffer* ommArray) {
     VK.DestroyMicromapEXT(GetVkDevice(), micromap, nullptr);
 }
 
+void OpacityMicroMapsHelper::DestroyBlasVK(nri::AccelerationStructure* blas) {
+    VkAccelerationStructureKHR vkBlas = (VkAccelerationStructureKHR)NRI.GetAccelerationStructureNativeObject(blas);
+    VK.DestroyAccelerationStructureKHR(GetVkDevice(), vkBlas, nullptr);
+}
+
 void OpacityMicroMapsHelper::ReleaseMemoryVK() {
     if (m_VkScrathBuffer)
         VK.DestroyBuffer(GetVkDevice(), m_VkScrathBuffer, nullptr);
@@ -167,7 +174,7 @@ void OpacityMicroMapsHelper::AllocateMemoryVK(uint64_t size) {
 
     VkMemoryAllocateFlagsInfo flagsInfo = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO};
     flagsInfo.flags = VK_MEMORY_ALLOCATE_DEVICE_MASK_BIT | VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
-    flagsInfo.deviceMask = 1 << NRI.GetDeviceDesc(*m_Device).adapterDesc.deviceId;
+    flagsInfo.deviceMask = 0x1;
 
     VkMemoryAllocateInfo allocInfo = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     allocInfo.allocationSize = allocationSize;
@@ -289,7 +296,7 @@ void OpacityMicroMapsHelper::GetPreBuildInfoVK(MaskedGeometryBuildDesc** queue, 
         uint64_t allocationSize = Align(maxMicromapSize, VK_PLACEMENT_ALIGNMENT) + Align(maxScratchSize, VK_PLACEMENT_ALIGNMENT);
         VkMemoryAllocateFlagsInfo flagsInfo = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO};
         flagsInfo.flags = VK_MEMORY_ALLOCATE_DEVICE_MASK_BIT | VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
-        flagsInfo.deviceMask = 1 << NRI.GetDeviceDesc(*m_Device).adapterDesc.deviceId;
+        flagsInfo.deviceMask = 0x1;
 
         VkMemoryAllocateInfo allocInfo = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
         allocInfo.allocationSize = allocationSize;

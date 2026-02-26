@@ -121,7 +121,6 @@ struct TraceOpaqueResult
 TraceOpaqueResult TraceOpaque( GeometryProps geometryProps, MaterialProps materialProps, uint2 pixelPos, float3x3 mirrorMatrix, float4 Lpsr )
 {
     TraceOpaqueResult result = ( TraceOpaqueResult )0;
-    result.specHitDist = NRD_FrontEnd_SpecHitDistAveraging_Begin( );
 
     float viewZ0 = Geometry::AffineTransform( gWorldToView, geometryProps.X ).z;
     float roughness0 = materialProps.roughness;
@@ -132,7 +131,7 @@ TraceOpaqueResult TraceOpaque( GeometryProps geometryProps, MaterialProps materi
         float3 albedo, Rf0;
         BRDF::ConvertBaseColorMetalnessToAlbedoRf0( materialProps.baseColor, materialProps.metalness, albedo, Rf0 );
 
-        NRD_MaterialFactors( materialProps.N, geometryProps.V, albedo, Rf0, materialProps.roughness, diffFactor0, specFactor0 );
+        NRD_MaterialFactors( materialProps.N, geometryProps.V, albedo, Rf0, roughness0, diffFactor0, specFactor0 );
 
         // We can combine radiance ( for everything ) and irradiance ( for hair ) in denoising if material ID test is enabled
         if( geometryProps.Has( FLAG_HAIR ) && NRD_NORMAL_ENCODING == NRD_NORMAL_ENCODING_R10G10B10A2_UNORM )
@@ -168,16 +167,17 @@ TraceOpaqueResult TraceOpaque( GeometryProps geometryProps, MaterialProps materi
     sharcParams.accumulationBuffer = gInOut_SharcAccumulated;
     sharcParams.resolvedBuffer = gInOut_SharcResolved;
 
+    float3 color;
     #if( USE_SHARC_DEBUG == 2 )
-        result.diffRadiance = HashGridDebugColoredHash( sharcHitData.positionWorld, hashGridParams );
+        color = HashGridDebugColoredHash( sharcHitData.positionWorld, sharcHitData.normalWorld, hashGridParams );
     #else
-        bool isValid = SharcGetCachedRadiance( sharcParams, sharcHitData, result.diffRadiance, true );
+        bool isValid = SharcGetCachedRadiance( sharcParams, sharcHitData, color, true );
 
         // Highlight invalid cells
-        // result.diffRadiance = isValid ?  result.diffRadiance : float3( 1.0, 0.0, 0.0 );
+        // color = isValid ?  color : float3( 1.0, 0.0, 0.0 );
     #endif
 
-    result.diffRadiance /= diffFactor0;
+    result.diffRadiance = color / diffFactor0;
 
     return result;
 #endif
@@ -217,7 +217,7 @@ TraceOpaqueResult TraceOpaque( GeometryProps geometryProps, MaterialProps materi
 
             // Importance sampling
             uint sampleMaxNum = 0;
-            if( bounce == 1 && gDisableShadowsAndEnableImportanceSampling )
+            if( gDisableShadowsAndEnableImportanceSampling && ( USE_IS_FOR_ALL_BOUNCES || bounce == 1 ) )
                 sampleMaxNum = PT_IMPORTANCE_SAMPLES_NUM * ( isDiffuse ? 1.0 : GetSpecMagicCurve( materialProps.roughness ) );
             sampleMaxNum = max( sampleMaxNum, 1 );
 
@@ -234,9 +234,9 @@ TraceOpaqueResult TraceOpaque( GeometryProps geometryProps, MaterialProps materi
                     float3 psrRay = Geometry::RotateVectorInverse( mirrorMatrix, ray );
 
                     if( isDiffuse )
-                        result.diffDirection += psrRay;
+                        result.diffDirection = psrRay;
                     else
-                        result.specDirection += psrRay;
+                        result.specDirection = psrRay;
                 #endif
             }
 
@@ -252,7 +252,7 @@ TraceOpaqueResult TraceOpaque( GeometryProps geometryProps, MaterialProps materi
             lobeTanHalfAngleAtOrigin = roughnessTemp * roughnessTemp / ( 1.0 + roughnessTemp * roughnessTemp );
 
             float2 mipAndCone = GetConeAngleFromRoughness( geometryProps.mip, isDiffuse ? 1.0 : materialProps.roughness );
-            geometryProps = CastRay( geometryProps.GetXoffset( geometryProps.N ), ray, 0.0, INF, mipAndCone, gWorldTlas, FLAG_NON_TRANSPARENT, PT_RAY_FLAGS );
+            geometryProps = CastRay( GetXoffset( geometryProps.X, geometryProps.N ), ray, 0.0, INF, mipAndCone, gWorldTlas, FLAG_NON_TRANSPARENT, PT_RAY_FLAGS );
             materialProps = GetMaterialProps( geometryProps ); // TODO: try to read metrials only if L1- and L2- lighting caches failed
         }
 
@@ -288,13 +288,13 @@ TraceOpaqueResult TraceOpaque( GeometryProps geometryProps, MaterialProps materi
                 float2 rndScaled = ImportanceSampling::Cosine::GetRay( Rng::Hash::GetFloat2( ) ).xy;
                 rndScaled *= 1.0 - footprintNorm; // reduce dithering if cone is already wide
                 rndScaled *= voxelSize;
+                rndScaled *= 1.5;
                 rndScaled *= USE_SHARC_DITHERING;
 
                 float3x3 mBasis = Geometry::GetBasis( geometryProps.N );
-                Xglobal += mBasis[ 0 ] * rndScaled.x + mBasis[ 1 ] * rndScaled.y;
+                float3 jitter = mBasis[ 0 ] * rndScaled.x + mBasis[ 1 ] * rndScaled.y;
 
                 SharcHitData sharcHitData;
-                sharcHitData.positionWorld = Xglobal;
                 sharcHitData.materialDemodulation = GetMaterialDemodulation( geometryProps, materialProps );
                 sharcHitData.normalWorld = geometryProps.N;
                 sharcHitData.emissive = materialProps.Lemi;
@@ -315,9 +315,30 @@ TraceOpaqueResult TraceOpaque( GeometryProps geometryProps, MaterialProps materi
                 isSharcAllowed &= Rng::Hash::GetFloat( ) > Lcached.w; // is needed?
                 isSharcAllowed &= Rng::Hash::GetFloat( ) < ( bounce == gBounceNum ? 1.0 : footprintNorm ); // is voxel size acceptable?
 
-                float3 sharcRadiance;
-                if( isSharcAllowed && SharcGetCachedRadiance( sharcParams, sharcHitData, sharcRadiance, false ) )
-                    Lcached = float4( sharcRadiance, 1.0 );
+                if( isSharcAllowed )
+                {
+                    float3 sharcRadiance = 0;
+
+                    // Try jittered position
+                    sharcHitData.positionWorld = Xglobal + jitter;
+                    bool isFound = SharcGetCachedRadiance( sharcParams, sharcHitData, sharcRadiance, false );
+
+                    if( !isFound )
+                    {
+                        // Slipped out of the surface or mismatched normals, try non-jittered position
+                        sharcHitData.positionWorld = Xglobal;
+                        isFound = SharcGetCachedRadiance( sharcParams, sharcHitData, sharcRadiance, false );
+                    }
+
+                    // Apply occlusion estimation for the last bounce
+                #if USE_AO_FOR_LAST_BOUNCE
+                    if( bounce == gBounceNum )
+                        sharcRadiance *= Math::Sqrt01( geometryProps.hitT / voxelSize );
+                #endif
+
+                    if( isFound )
+                        Lcached = float4( sharcRadiance, 1.0 );
+                }
 
                 // Cache miss - compute lighting, if not found in caches
                 if( Rng::Hash::GetFloat( ) > Lcached.w )
@@ -354,31 +375,29 @@ TraceOpaqueResult TraceOpaque( GeometryProps geometryProps, MaterialProps materi
         }
     }
 
-    // Normalize hit distances for REBLUR before averaging ( needed only for AO for REFERENCE )
+    // Normalize hit distances for REBLUR before averaging
     float normHitDist = accumulatedHitDist;
     if( gDenoiserType != DENOISER_RELAX )
-        normHitDist = REBLUR_FrontEnd_GetNormHitDist( accumulatedHitDist, viewZ0, gHitDistParams, isDiffusePath ? 1.0 : roughness0 );
+        normHitDist = REBLUR_FrontEnd_GetNormHitDist( accumulatedHitDist, viewZ0, gHitDistSettings, isDiffusePath ? 1.0 : roughness0 );
 
     // Accumulate diffuse and specular separately for denoising
     if( !USE_SANITIZATION || NRD_IsValidRadiance( Lsum ) )
     {
         if( isDiffusePath )
         {
-            result.diffRadiance += Lsum;
-            result.diffHitDist += normHitDist;
+            result.diffRadiance = Lsum;
+            result.diffHitDist = normHitDist;
         }
         else
         {
-            result.specRadiance += Lsum;
-            NRD_FrontEnd_SpecHitDistAveraging_Add( result.specHitDist, normHitDist );
+            result.specRadiance = Lsum;
+            result.specHitDist = normHitDist;
         }
     }
 
     // Material de-modulation ( convert irradiance into radiance )
     result.diffRadiance /= diffFactor0;
     result.specRadiance /= specFactor0;
-
-    NRD_FrontEnd_SpecHitDistAveraging_End( result.specHitDist );
 
     return result;
 }
@@ -429,12 +448,14 @@ void main( uint2 pixelPos : SV_DispatchThreadId )
     GeometryProps geometryProps0 = CastRay( cameraRayOrigin, cameraRayDirection, 0.0, INF, GetConeAngleFromRoughness( 0.0, 0.0 ), gWorldTlas, FLAG_NON_TRANSPARENT, 0 );
     MaterialProps materialProps0 = GetMaterialProps( geometryProps0 );
     
+    //OmmSample specific
     if (geometryProps0.IsAnyhitTriggered() && gHightlightAhs)
     {
         const float3 dbgColor = float3(1.0, 0.0, 1.0);
         materialProps0.Lemi = lerp(materialProps0.Lemi, dbgColor * length(materialProps0.Lemi), 0.5);
         materialProps0.baseColor = lerp(materialProps0.baseColor, dbgColor * length(materialProps0.baseColor), 0.5);
     }
+    //OmmSample specific
 
     //================================================================================================================================================================================
     // Primary surface replacement ( aka jump through mirrors )
@@ -477,7 +498,7 @@ void main( uint2 pixelPos : SV_DispatchThreadId )
 
             // Trace to the next hit
             float2 mipAndCone = GetConeAngleFromRoughness( geometryProps0.mip, materialProps0.roughness );
-            geometryProps0 = CastRay( geometryProps0.GetXoffset( geometryProps0.N ), ray, 0.0, INF, mipAndCone, gWorldTlas, FLAG_NON_TRANSPARENT, PT_RAY_FLAGS );
+            geometryProps0 = CastRay( GetXoffset( geometryProps0.X, geometryProps0.N ), ray, 0.0, INF, mipAndCone, gWorldTlas, FLAG_NON_TRANSPARENT, PT_RAY_FLAGS );
             materialProps0 = GetMaterialProps( geometryProps0 );
         }
 
@@ -590,18 +611,44 @@ void main( uint2 pixelPos : SV_DispatchThreadId )
     result.diffRadiance /= lerp( 1.0 / maxFireflyEnergyScaleFactor, 1.0, Rng::Hash::GetFloat( ) );
 #endif
 
+    float4 outDiff = 0.0;
+    float4 outSpec = 0.0;
+    float4 outDiffSh = 0.0;
+    float4 outSpecSh = 0.0;
+
+    if( gDenoiserType == DENOISER_RELAX )
+    {
+    #if( NRD_MODE == SH )
+        outDiff = RELAX_FrontEnd_PackSh( result.diffRadiance, result.diffHitDist, result.diffDirection, outDiffSh, USE_SANITIZATION );
+        outSpec = RELAX_FrontEnd_PackSh( result.specRadiance, result.specHitDist, result.specDirection, outSpecSh, USE_SANITIZATION );
+    #else
+        outDiff = RELAX_FrontEnd_PackRadianceAndHitDist( result.diffRadiance, result.diffHitDist, USE_SANITIZATION );
+        outSpec = RELAX_FrontEnd_PackRadianceAndHitDist( result.specRadiance, result.specHitDist, USE_SANITIZATION );
+    #endif
+    }
+    else
+    {
+    #if( NRD_MODE == SH )
+        outDiff = REBLUR_FrontEnd_PackSh( result.diffRadiance, result.diffHitDist, result.diffDirection, outDiffSh, USE_SANITIZATION );
+        outSpec = REBLUR_FrontEnd_PackSh( result.specRadiance, result.specHitDist, result.specDirection, outSpecSh, USE_SANITIZATION );
+    #else
+        outDiff = REBLUR_FrontEnd_PackRadianceAndNormHitDist( result.diffRadiance, result.diffHitDist, USE_SANITIZATION );
+        outSpec = REBLUR_FrontEnd_PackRadianceAndNormHitDist( result.specRadiance, result.specHitDist, USE_SANITIZATION );
+    #endif
+    }
+
+    WriteResult( pixelPos, outDiff, outSpec, outDiffSh, outSpecSh );
+
     //================================================================================================================================================================================
     // Sun shadow
     //================================================================================================================================================================================
-
-    geometryProps0.X = Xshadow;
 
     float2 rnd = GetBlueNoise( pixelPos );
     rnd = ImportanceSampling::Cosine::GetRay( rnd ).xy;
     rnd *= gTanSunAngularRadius;
 
     float3 sunDirection = normalize( gSunBasisX.xyz * rnd.x + gSunBasisY.xyz * rnd.y + gSunDirection.xyz );
-    float3 Xoffset = geometryProps0.GetXoffset( sunDirection, PT_SHADOW_RAY_OFFSET );
+    float3 Xoffset = GetXoffset( Xshadow, sunDirection, PT_SHADOW_RAY_OFFSET );
     float2 mipAndCone = GetConeAngleFromAngularRadius( geometryProps0.mip, gTanSunAngularRadius );
 
     float shadowTranslucency = ( Color::Luminance( Ldirect ) != 0.0 && !gDisableShadowsAndEnableImportanceSampling ) ? 1.0 : 0.0;
@@ -631,36 +678,4 @@ void main( uint2 pixelPos : SV_DispatchThreadId )
 
     gOut_ShadowData[ pixelPos ] = penumbra;
     gOut_Shadow_Translucency[ pixelPos ] = translucency;
-
-    //================================================================================================================================================================================
-    // Output
-    //================================================================================================================================================================================
-
-    float4 outDiff = 0.0;
-    float4 outSpec = 0.0;
-    float4 outDiffSh = 0.0;
-    float4 outSpecSh = 0.0;
-
-    if( gDenoiserType == DENOISER_RELAX )
-    {
-    #if( NRD_MODE == SH )
-        outDiff = RELAX_FrontEnd_PackSh( result.diffRadiance, result.diffHitDist, result.diffDirection, outDiffSh, USE_SANITIZATION );
-        outSpec = RELAX_FrontEnd_PackSh( result.specRadiance, result.specHitDist, result.specDirection, outSpecSh, USE_SANITIZATION );
-    #else
-        outDiff = RELAX_FrontEnd_PackRadianceAndHitDist( result.diffRadiance, result.diffHitDist, USE_SANITIZATION );
-        outSpec = RELAX_FrontEnd_PackRadianceAndHitDist( result.specRadiance, result.specHitDist, USE_SANITIZATION );
-    #endif
-    }
-    else
-    {
-    #if( NRD_MODE == SH )
-        outDiff = REBLUR_FrontEnd_PackSh( result.diffRadiance, result.diffHitDist, result.diffDirection, outDiffSh, USE_SANITIZATION );
-        outSpec = REBLUR_FrontEnd_PackSh( result.specRadiance, result.specHitDist, result.specDirection, outSpecSh, USE_SANITIZATION );
-    #else
-        outDiff = REBLUR_FrontEnd_PackRadianceAndNormHitDist( result.diffRadiance, result.diffHitDist, USE_SANITIZATION );
-        outSpec = REBLUR_FrontEnd_PackRadianceAndNormHitDist( result.specRadiance, result.specHitDist, USE_SANITIZATION );
-    #endif
-    }
-
-    WriteResult( pixelPos, outDiff, outSpec, outDiffSh, outSpecSh );
 }
