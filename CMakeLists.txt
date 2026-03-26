@@ -86,6 +86,8 @@ set(DEPS)
 if(NOT TARGET ShaderMake)
     # ShaderMake
     option(SHADERMAKE_TOOL "" OFF)
+    set(SHADERMAKE_DXC_DATE "2026_02_20" CACHE STRING "" FORCE)
+    set(SHADERMAKE_DXC_VERSION "v1.9.2602" CACHE STRING "" FORCE)
 
     FetchContent_Declare(
         shadermake
@@ -332,7 +334,7 @@ set(SHADERMAKE_GENERAL_ARGS
     --WX
     --sRegShift 0 --bRegShift 32 --uRegShift 64 --tRegShift 128 # TODO: must be in sync with "VK_BINDING_OFFSETS"
     --binary
-    --shaderModel 6_6
+    --shaderModel 6_9
     --sourceDir "Shaders"
     --ignoreConfigDir
     -c "Shaders/Shaders.cfg"

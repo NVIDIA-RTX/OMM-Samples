@@ -260,7 +260,7 @@ float CastVisibilityRay_AnyHit( float3 origin, float3 direction, float Tmin, flo
     rayDesc.TMin = Tmin;
     rayDesc.TMax = Tmax;
 
-    RayQuery< RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH > rayQuery;
+    RayQuery< RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS > rayQuery;
     rayQuery.TraceRayInline( accelerationStructure, rayFlags, instanceInclusionMask, rayDesc );
 
     while( rayQuery.Proceed( ) )
@@ -277,7 +277,7 @@ float CastVisibilityRay_ClosestHit( float3 origin, float3 direction, float Tmin,
     rayDesc.TMin = Tmin;
     rayDesc.TMax = Tmax;
 
-    RayQuery< RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES > rayQuery;
+    RayQuery< RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES, RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS > rayQuery;
     rayQuery.TraceRayInline( accelerationStructure, rayFlags, instanceInclusionMask, rayDesc );
 
     while( rayQuery.Proceed( ) )
@@ -294,7 +294,7 @@ GeometryProps CastRay( float3 origin, float3 direction, float Tmin, float Tmax, 
     rayDesc.TMin = Tmin;
     rayDesc.TMax = Tmax;
 
-    RayQuery< RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES > rayQuery;
+    RayQuery< RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES, RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS > rayQuery;
     rayQuery.TraceRayInline( accelerationStructure, rayFlags, instanceInclusionMask, rayDesc );
 
     bool anyAnyhit = false;
