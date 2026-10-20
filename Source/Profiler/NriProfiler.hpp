@@ -12,6 +12,7 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 #include <string>
 #include <vector>
 #include <array>
+#include <cstring>
 #include "NRI.h"
 #include "Extensions/NRIHelper.h"
 
@@ -113,7 +114,7 @@ void Profiler::ResolveBufferedFrame()
     dstBuffer.resize(m_QueriesNum);
 
     void* srcBuffer = m_NRI.MapBuffer(*m_QueryBuffers[m_OldestBufferedFrameID], 0, m_QueryBufferSize);
-    memcpy_s(dstBuffer.data(), dstBuffer.size() * sizeof(uint64_t), srcBuffer, m_QueryBufferSize);
+    std::memcpy(dstBuffer.data(), srcBuffer, m_QueryBufferSize);
     m_NRI.UnmapBuffer(*m_QueryBuffers[m_OldestBufferedFrameID]);
 
     std::vector<ProfilerContext>& targetFrameContexts = m_Contexts[m_OldestBufferedFrameID];

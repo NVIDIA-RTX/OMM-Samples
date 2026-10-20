@@ -1,7 +1,16 @@
 // © 2022 NVIDIA Corporation
+#include <atomic>
+#include <chrono>
+#include <cinttypes>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <exception>
 #include <future>
 #include <map>
+#include <mutex>
 #include <set>
+#include <thread>
 #include "VisibilityMasks/OmmHelper.h"
 
 #include "NRIFramework.h"
@@ -641,6 +650,7 @@ private:
     nri::Queue* m_GraphicsQueue = nullptr;
     nri::Fence* m_FrameFence = nullptr;
     nri::DescriptorPool* m_DescriptorPool = nullptr;
+    nri::StreamerCopyBatch m_StreamerCopyBatch = 0;
     nri::PipelineLayout* m_PipelineLayout = nullptr;
     std::array<nri::Upscaler*, 2> m_NIS = {};
     std::vector<QueuedFrame> m_QueuedFrames = {};
@@ -702,8 +712,10 @@ private: // OMM:
     struct OmmNriContext;
     void InitAlphaTestedGeometry();
 
+    void FinishOmmGeometryUpdate();
+    void StartOmmGeometryUpdate(uint64_t fenceValue);
     void RebuildOmmGeometry();
-    void RebuildOmmGeometryAsync(uint32_t const* frameId);
+    void RebuildOmmGeometryAsync(uint64_t fenceValue);
     void OmmGeometryUpdate(OmmNriContext& context, bool doBatching);
 
     void FillOmmBakerInputs();
@@ -733,7 +745,7 @@ private: // OMM:
     void ReleaseMaskedGeometry();
     void ReleaseBakingResources();
 
-    void AppendOmmImguiSettings();
+    void AppendOmmImguiSettings(uint32_t frameIndex);
 
 private:
     struct OmmNriContext {
@@ -777,10 +789,14 @@ private:
 
     std::map<uint64_t, OmmBlas> m_InstanceMaskToMaskedBlasData;
     std::vector<OmmBlas> m_MaskedBlasses;
+    std::mutex m_OmmGeometryMutex;
+    std::future<void> m_OmmUpdateTask;
+    std::atomic<bool> m_OmmShuttingDown = false;
     ommhelper::OmmBakeDesc m_OmmBakeDesc = {};
+    ommhelper::OmmBakeDesc m_OmmPendingBakeDesc = {};
     std::string m_SceneName = "Scene";
     std::string m_OmmCacheFolderName = "_OmmCache";
-    uint32_t m_OmmUpdateProgress = 0;
+    std::atomic<uint32_t> m_OmmUpdateProgress = 0;
     bool m_EnableOmm = true;
     bool m_ShowFullSettings = false;
     bool m_IsOmmBakingActive = false;
@@ -797,14 +813,18 @@ private:
 Sample::~Sample() {
 
 #pragma region[ OmmSample specific ]
+    // Stop the baker before releasing resources it can access.
+    m_OmmShuttingDown.store(true);
+    FinishOmmGeometryUpdate();
+    if (NRI.HasCore())
+        NRI.DeviceWaitIdle(m_Device);
+
     m_Scene.UnloadTextureData();
     ReleaseMaskedGeometry();
     ReleaseBakingResources();
 #pragma endregion
 
     if (NRI.HasCore()) {
-
-        NRI.DeviceWaitIdle(m_Device);
 
 #pragma region[ OmmSample specific ]
         m_OmmHelper.Destroy();
@@ -908,14 +928,13 @@ bool Sample::Initialize(nri::GraphicsAPI graphicsAPI, bool) {
     NRI_ABORT_ON_FAILURE(nri::nriGetInterface(*m_Device, NRI_INTERFACE(nri::UpscalerInterface), (nri::UpscalerInterface*)&NRI));
 
 #pragma region[ OmmSample specific ]
-    #if DXR_OMM
+    #ifdef _WIN32
     {
         nri::DeviceDesc deviceDesc = NRI.GetDeviceDesc(*m_Device);
         if (deviceDesc.graphicsAPI == nri::GraphicsAPI::D3D12 && deviceDesc.tiers.rayTracing < 3) {
             const char* errorMessage =
                 "D3D12_RAYTRACING_TIER_1_2 is required for Opacity Micromaps.\n\n"
-                "Please make sure your GPU supports this tier and update the driver to the latest (NVGRD 595+).\n\n"
-                "Or disable DXR_OMM in CmakeLisit.txt to use NVAPI on NVGPU";
+                "Please make sure your GPU supports this tier and update the driver to the latest (NVGRD 595+).";
             MessageBoxA(nullptr, errorMessage, "DXR 1.2 Support Required", MB_OK | MB_ICONERROR);
             NRI_ABORT_ON_FALSE(false);
         }
@@ -931,8 +950,9 @@ bool Sample::Initialize(nri::GraphicsAPI graphicsAPI, bool) {
         streamerDesc.constantBufferMemoryLocation = nri::MemoryLocation::DEVICE_UPLOAD;
         streamerDesc.constantBufferSize = DYNAMIC_CONSTANT_BUFFER_SIZE;
         streamerDesc.dynamicBufferMemoryLocation = nri::MemoryLocation::DEVICE_UPLOAD;
-        streamerDesc.dynamicBufferDesc = {0, 0, nri::BufferUsageBits::VERTEX_BUFFER | nri::BufferUsageBits::INDEX_BUFFER | nri::BufferUsageBits::SHADER_RESOURCE | nri::BufferUsageBits::ACCELERATION_STRUCTURE_BUILD_INPUT};
+        streamerDesc.dynamicBufferDesc = {0, 0, nri::BufferUsageBits::VERTEX | nri::BufferUsageBits::INDEX | nri::BufferUsageBits::SHADER_RESOURCE | nri::BufferUsageBits::ACCELERATION_STRUCTURE_BUILD_INPUT};
         streamerDesc.queuedFrameNum = GetQueuedFrameNum();
+        streamerDesc.hostDataCapacity = IMGUI_HOST_DATA_CAPACITY;
         NRI_ABORT_ON_FAILURE(NRI.CreateStreamer(*m_Device, streamerDesc, m_Streamer));
     }
 
@@ -1101,6 +1121,12 @@ bool Sample::Initialize(nri::GraphicsAPI graphicsAPI, bool) {
 
 #pragma region[ OmmSample specific ]
     {
+        if (graphicsAPI == nri::GraphicsAPI::D3D12) {
+            m_OmmBakeDesc.cpuFlags.allow8bitIndices = true;
+            m_OmmBakeDesc.gpuFlags.allow8bitIndices = true;
+        }
+        m_OmmPendingBakeDesc = m_OmmBakeDesc;
+
         InitAlphaTestedGeometry();
         m_OmmHelper.Initialize(m_Device, m_DisableOmmBlasBuild);
         m_Profiler.Init(m_Device);
@@ -1124,16 +1150,6 @@ bool Sample::Initialize(nri::GraphicsAPI graphicsAPI, bool) {
             m_Settings.exposure = 18.0f;
         }
         m_Camera.Initialize(cameraInitialPos, lookAtPos, CAMERA_RELATIVE);
-
-        if (NRI.GetDeviceDesc(*m_Device).graphicsAPI == nri::GraphicsAPI::D3D12) {
-            std::string windowTitle = std::string(glfwGetWindowTitle(m_Window));
-#if DXR_OMM
-            windowTitle += " [DXR 1.2]";
-#else
-            windowTitle += " [NVAPI]";
-#endif
-            glfwSetWindowTitle(m_Window, windowTitle.c_str());
-        }
     }
 #pragma endregion
 
@@ -1170,6 +1186,7 @@ void BindBuffersToMemory(NRIInterface& nri, nri::Device* device, nri::Buffer** b
 }
 
 nri::AccelerationStructure* Sample::GetMaskedBlas(uint64_t insatanceMask) {
+    std::lock_guard<std::mutex> lock(m_OmmGeometryMutex);
     const auto& it = m_InstanceMaskToMaskedBlasData.find(insatanceMask);
     if (it != m_InstanceMaskToMaskedBlasData.end())
         return it->second.blas;
@@ -1206,14 +1223,15 @@ void Sample::InitAlphaTestedGeometry() {
     size_t positionBufferSize = 0;
     size_t indexBufferSize = 0;
     size_t uvBufferSize = 0;
+    uint32_t bufferAlignment = NRI.GetDeviceDesc(*m_Device).memoryAlignment.bufferShaderResourceOffset;
 
     for (size_t i = 0; i < alphaInstances.size(); ++i) { // Calculate buffer sizes
         const utils::Instance& instance = m_Scene.instances[alphaInstances[i]];
         const utils::Mesh& mesh = m_Scene.meshes[instance.meshInstanceIndex];
 
-        positionBufferSize += helper::Align(mesh.vertexNum * sizeof(float3), 256);
-        indexBufferSize += helper::Align(mesh.indexNum * sizeof(utils::Index), 256);
-        uvBufferSize += helper::Align(mesh.vertexNum * sizeof(float2), 256);
+        positionBufferSize += helper::Align(mesh.vertexNum * sizeof(float3), bufferAlignment);
+        indexBufferSize += helper::Align(mesh.indexNum * sizeof(utils::Index), bufferAlignment);
+        uvBufferSize += helper::Align(mesh.vertexNum * sizeof(float2), bufferAlignment);
     }
 
     m_OmmAlphaGeometryBuffers.reserve(3);
@@ -1229,9 +1247,10 @@ void Sample::InitAlphaTestedGeometry() {
         NRI_ABORT_ON_FAILURE(NRI.CreateBuffer(*m_Device, bufferDesc, positionBuffer));
 
         bufferDesc.size = indexBufferSize;
+        bufferDesc.byteAddress = true;
         NRI_ABORT_ON_FAILURE(NRI.CreateBuffer(*m_Device, bufferDesc, indexBuffer));
 
-        // uv buffer is used in OMM baking as a raw read buffer. For compatibility with Vulkan this buffer is required to be structured
+        // UVs are read as a byte-address buffer by the OMM baker.
         bufferDesc.usage = nri::BufferUsageBits::SHADER_RESOURCE;
         bufferDesc.size = uvBufferSize;
         bufferDesc.structureStride = sizeof(uint32_t);
@@ -1242,9 +1261,6 @@ void Sample::InitAlphaTestedGeometry() {
     std::vector<uint8_t> positions;
     std::vector<uint8_t> uvs;
     std::vector<uint8_t> indices;
-
-    uint32_t storageAlignment = NRI.GetDeviceDesc(*m_Device).memoryAlignment.bufferShaderResourceOffset;
-    uint32_t bufferAlignment = storageAlignment;
 
     nri::Texture** materialTextures = m_Textures.data() + (size_t)Texture::BaseReadOnlyTexture;
     for (size_t i = 0; i < alphaInstances.size(); ++i) {
@@ -1294,7 +1310,7 @@ void Sample::InitAlphaTestedGeometry() {
         geometry.uvs = uvBuffer;
         geometry.uvOffset = uvs.size();
         geometry.uvBufferSize = uvBufferSize;
-        uvs.resize(geometry.uvOffset + helper::Align(uvDataSize, storageAlignment));
+        uvs.resize(geometry.uvOffset + helper::Align(uvDataSize, bufferAlignment));
         memcpy(uvs.data() + geometry.uvOffset, geometry.uvData.data(), uvDataSize);
     }
 
@@ -1596,7 +1612,7 @@ void CopyFromReadBackBuffer(const NRIInterface& NRI, ommhelper::OmmBakeGeometryD
     void* map = NRI.MapBuffer(*readback, offset, size);
     memcpy(data.data(), map, size);
 
-    ZeroMemory(map, size);
+    std::memset(map, 0, size);
     NRI.UnmapBuffer(*readback);
 }
 
@@ -1636,10 +1652,10 @@ OmmGpuBakerPrebuildMemoryStats Sample::GetGpuBakerPrebuildMemoryStats(bool print
         auto toMb = [](size_t sizeInBytes) -> double { return double(sizeInBytes) / 1024.0 / 1024.0; };
         printf("\n[OMM][GPU] PreBake Stats:\n");
         printf("Mask Format: [%s]\n", m_OmmBakeDesc.format == ommhelper::OmmFormats::OC1_2_STATE ? "OC1_2_STATE" : "OC1_4_STATE");
-        printf("Subdivision Level: [%lu]\n", m_OmmBakeDesc.subdivisionLevel);
-        printf("Mip Bias: [%lu]\n", m_OmmBakeDesc.mipBias);
-        printf("Num Geometries: [%llu]\n", m_OmmAlphaGeometry.size());
-        printf("Num Primitives: Max:[%llu],  Total:[%llu]\n", maxPrimitiveNum, totalPrimitiveNum);
+        printf("Subdivision Level: [%u]\n", m_OmmBakeDesc.subdivisionLevel);
+        printf("Mip Bias: [%u]\n", m_OmmBakeDesc.mipBias);
+        printf("Num Geometries: [%zu]\n", m_OmmAlphaGeometry.size());
+        printf("Num Primitives: Max:[%" PRIu64 "],  Total:[%" PRIu64 "]\n", maxPrimitiveNum, totalPrimitiveNum);
         printf("Baker output memeory requested(mb): (total)%.3f\n", toMb(result.total));
         printf("Total ArrayDataSize(mb): %.3f\n", toMb(result.outputTotalSizes[(uint32_t)ommhelper::OmmDataLayout::ArrayData]));
         printf("Total DescArraySize(mb): %.3f\n", toMb(result.outputTotalSizes[(uint32_t)ommhelper::OmmDataLayout::DescArray]));
@@ -1730,6 +1746,7 @@ void Sample::CreateAndBindGpuBakerArrayDataBuffer(const OmmGpuBakerPrebuildMemor
     nri::BufferDesc bufferDesc = {};
     bufferDesc.structureStride = sizeof(uint32_t);
     bufferDesc.size = memoryStats.outputTotalSizes[arrayDataId];
+    bufferDesc.byteAddress = true;
     bufferDesc.size = helper::Align(bufferDesc.size, ommAlignment);
     bufferDesc.usage = nri::BufferUsageBits::SHADER_RESOURCE_STORAGE | nri::BufferUsageBits::SHADER_RESOURCE;
     NRI_ABORT_ON_FAILURE(NRI.CreateBuffer(*m_Device, bufferDesc, m_OmmGpuOutputBuffers[arrayDataId]));
@@ -1761,6 +1778,7 @@ void Sample::CreateAndBindGpuBakerSatitcBuffers(const OmmGpuBakerPrebuildMemoryS
     std::vector<nri::Buffer*> readbackBuffers;
     for (size_t i = staticDataBegin; i < buffersEnd; ++i) {
         bufferDesc.size = memoryStats.outputTotalSizes[i];
+        bufferDesc.byteAddress = true;
         bufferDesc.usage = nri::BufferUsageBits::SHADER_RESOURCE_STORAGE | nri::BufferUsageBits::SHADER_RESOURCE;
         NRI_ABORT_ON_FAILURE(NRI.CreateBuffer(*m_Device, bufferDesc, m_OmmGpuOutputBuffers[i]));
         gpuBuffers.push_back(m_OmmGpuOutputBuffers[i]);
@@ -1769,7 +1787,8 @@ void Sample::CreateAndBindGpuBakerSatitcBuffers(const OmmGpuBakerPrebuildMemoryS
     for (size_t i = 0; i < OMM_MAX_TRANSIENT_POOL_BUFFERS; ++i) {
         bufferDesc.size = memoryStats.maxTransientBufferSizes[i];
         if (bufferDesc.size) {
-            bufferDesc.usage = nri::BufferUsageBits::SHADER_RESOURCE_STORAGE | nri::BufferUsageBits::SHADER_RESOURCE | nri::BufferUsageBits::ARGUMENT_BUFFER;
+            bufferDesc.byteAddress = true;
+            bufferDesc.usage = nri::BufferUsageBits::SHADER_RESOURCE_STORAGE | nri::BufferUsageBits::SHADER_RESOURCE | nri::BufferUsageBits::ARGUMENT;
             NRI_ABORT_ON_FAILURE(NRI.CreateBuffer(*m_Device, bufferDesc, m_OmmGpuTransientBuffers[i]));
             gpuBuffers.push_back(m_OmmGpuTransientBuffers[i]);
         }
@@ -1778,6 +1797,7 @@ void Sample::CreateAndBindGpuBakerSatitcBuffers(const OmmGpuBakerPrebuildMemoryS
     for (size_t i = postBakeReadbackDataBegin; i < buffersEnd; ++i) {
         bufferDesc.size = memoryStats.outputTotalSizes[i];
         bufferDesc.usage = nri::BufferUsageBits::NONE;
+        bufferDesc.byteAddress = false;
         NRI_ABORT_ON_FAILURE(NRI.CreateBuffer(*m_Device, bufferDesc, m_OmmGpuReadbackBuffers[i]));
         readbackBuffers.push_back(m_OmmGpuReadbackBuffers[i]);
     }
@@ -2002,7 +2022,7 @@ void Sample::OmmGeometryUpdate(OmmNriContext& context, bool doBatching) {
 
     for (size_t batchId = 0; batchId < batches.size(); ++batchId) {
         const OmmBatch& batch = batches[batchId];
-        printf("\r%s\r[OMM] Batch [%llu / %llu]: ", std::string(100, ' ').c_str(), batchId + 1, batches.size());
+        printf("\r%s\r[OMM] Batch [%zu / %zu]: ", std::string(100, ' ').c_str(), batchId + 1, batches.size());
         std::vector<ommhelper::OmmBakeGeometryDesc*> bakeQueue;
         InitializeOmmGeometryFromCache(batch, bakeQueue);
 
@@ -2041,6 +2061,7 @@ void Sample::OmmGeometryUpdate(OmmNriContext& context, bool doBatching) {
 
                 uint64_t mask = GetInstanceHash(m_OmmAlphaGeometry[id].meshIndex, m_OmmAlphaGeometry[id].materialIndex);
                 OmmBlas ommBlas = {buildDesc.outputs.blas, buildDesc.outputs.ommArray};
+                std::lock_guard<std::mutex> lock(m_OmmGeometryMutex);
                 m_InstanceMaskToMaskedBlasData.insert(std::make_pair(mask, ommBlas));
                 m_MaskedBlasses.push_back({buildDesc.outputs.blas, buildDesc.outputs.ommArray});
             }
@@ -2065,13 +2086,48 @@ void Sample::OmmGeometryUpdate(OmmNriContext& context, bool doBatching) {
     m_OmmUpdateProgress = 0;
 }
 
-void Sample::RebuildOmmGeometryAsync(uint32_t const* frameId) {
-    uint32_t fistFrame = *frameId;
-    uint32_t endFrame = fistFrame + GetOptimalSwapChainTextureNum();
-    m_InstanceMaskToMaskedBlasData.clear(); // stop using masked geometry here
+void Sample::FinishOmmGeometryUpdate() {
+    if (!m_OmmUpdateTask.valid())
+        return;
 
-    while (*frameId < endFrame)
-        Sleep(1);
+    try {
+        m_OmmUpdateTask.get();
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[FAIL][OMM] Bake failed: %s\n", e.what());
+        std::abort();
+    } catch (...) {
+        fprintf(stderr, "[FAIL][OMM] Bake failed with an unknown exception.\n");
+        std::abort();
+    }
+}
+
+void Sample::StartOmmGeometryUpdate(uint64_t fenceValue) {
+    if (m_OmmUpdateTask.valid() && m_OmmUpdateTask.wait_for(std::chrono::microseconds(0)) != std::future_status::ready)
+        return;
+
+    FinishOmmGeometryUpdate();
+    m_OmmBakeDesc = m_OmmPendingBakeDesc;
+    bool isCpuBaker = m_OmmBakeDesc.type == ommhelper::OmmBakerType::CPU;
+    if (m_EnableAsync || isCpuBaker) {
+        {
+            std::lock_guard<std::mutex> lock(m_OmmGeometryMutex);
+            m_InstanceMaskToMaskedBlasData.clear();
+        }
+        m_OmmUpdateTask = std::async(std::launch::async, &Sample::RebuildOmmGeometryAsync, this, fenceValue);
+    } else
+        RebuildOmmGeometry();
+}
+
+void Sample::RebuildOmmGeometryAsync(uint64_t fenceValue) {
+    // The lookup was cleared before gathering this frame's instances. Retire prior GPU work.
+    while (NRI.GetFenceValue(*m_FrameFence) < fenceValue) {
+        if (m_OmmShuttingDown.load())
+            return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    if (m_OmmShuttingDown.load())
+        return;
 
     OmmGeometryUpdate(m_OmmComputeContext, false);
 }
@@ -2082,11 +2138,15 @@ void Sample::RebuildOmmGeometry() {
 }
 
 void Sample::ReleaseMaskedGeometry() {
-    for (auto& resource : m_MaskedBlasses)
+    std::vector<OmmBlas> maskedBlasses;
+    {
+        std::lock_guard<std::mutex> lock(m_OmmGeometryMutex);
+        m_InstanceMaskToMaskedBlasData.clear();
+        maskedBlasses.swap(m_MaskedBlasses);
+    }
+    for (auto& resource : maskedBlasses)
         m_OmmHelper.DestroyMaskedGeometry(resource.blas, resource.ommArray);
 
-    m_InstanceMaskToMaskedBlasData.clear();
-    m_MaskedBlasses.clear();
     m_OmmHelper.ReleaseGeometryMemory();
 }
 
@@ -2172,8 +2232,8 @@ bool IsRebuildAvailable(ommhelper::OmmBakeDesc& updated, ommhelper::OmmBakeDesc&
     return result;
 }
 
-void Sample::AppendOmmImguiSettings() {
-    static ommhelper::OmmBakeDesc bakeDesc = m_OmmBakeDesc;
+void Sample::AppendOmmImguiSettings(uint32_t frameIndex) {
+    ommhelper::OmmBakeDesc& bakeDesc = m_OmmPendingBakeDesc;
 
     ImGui::PushStyleColor(ImGuiCol_Text, UI_HEADER);
     ImGui::PushStyleColor(ImGuiCol_Header, UI_HEADER_BACKGROUND);
@@ -2185,7 +2245,10 @@ void Sample::AppendOmmImguiSettings() {
         if (isUnfolded) {
             ImGui::Checkbox("Enable OMMs", &m_EnableOmm);
             ImGui::SameLine();
-            ImGui::Text("[Masked Geometry Num: %llu]", m_MaskedBlasses.size());
+            {
+                std::lock_guard<std::mutex> lock(m_OmmGeometryMutex);
+                ImGui::Text("[Masked Geometry Num: %zu]", m_MaskedBlasses.size());
+            }
             ImVec4 color = m_Settings.highLightAhs ? ImVec4(1.0f, 0.0f, 1.0f, 1.0f) : ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
             ImGui::PushStyleColor(ImGuiCol_Text, color);
             ImGui::Checkbox("Highlight AHS", &m_Settings.highLightAhs);
@@ -2302,40 +2365,29 @@ void Sample::AppendOmmImguiSettings() {
 
             bool isRebuildAvailable = IsRebuildAvailable(bakeDesc, m_OmmBakeDesc);
 
-            static std::future<void> asyncUpdateTask = {};
             bool isAsyncActive = false;
-            if (asyncUpdateTask.valid())
-                isAsyncActive = asyncUpdateTask.wait_for(std::chrono::microseconds(0)) != std::future_status::ready && asyncUpdateTask.valid();
+            if (m_OmmUpdateTask.valid())
+                isAsyncActive = m_OmmUpdateTask.wait_for(std::chrono::microseconds(0)) != std::future_status::ready;
 
             const static ImU32 greyColor = ImGui::GetColorU32(ImVec4(0.3f, 0.3f, 0.3f, 1.0f));
             const static ImU32 greenColor = ImGui::GetColorU32(ImVec4(0.0f, 0.6f, 0.0f, 1.0f));
             const static ImU32 redColor = ImGui::GetColorU32(ImVec4(0.6f, 0.0f, 0.0f, 1.0f));
 
-            static uint32_t frameId = 0;
-            bool forceRebuild = frameId == m_OmmBakeDesc.buildFrameId;
             {
                 ImU32 buttonColor = isRebuildAvailable ? greenColor : greyColor;
                 buttonColor = isAsyncActive ? redColor : buttonColor;
 
                 ImGui::PushStyleColor(ImGuiCol_::ImGuiCol_Button, buttonColor);
-                if ((ImGui::Button("Bake OMMs") || forceRebuild) && !isAsyncActive) {
-                    m_OmmBakeDesc = bakeDesc;
-
-                    bool launchAsyncTask = (m_EnableAsync && !isCpuBaker) || isCpuBaker;
-                    if (launchAsyncTask)
-                        asyncUpdateTask = std::async(std::launch::async, &Sample::RebuildOmmGeometryAsync, this, &frameId);
-                    else
-                        RebuildOmmGeometry();
-                }
+                if (ImGui::Button("Bake OMMs") && !isAsyncActive)
+                    StartOmmGeometryUpdate(frameIndex);
                 ImGui::PopStyleColor();
 
                 ImGui::SameLine();
                 ImGui::Checkbox("Use OMM Cache", &enableCaching);
 
                 if (isAsyncActive)
-                    ImGui::ProgressBar(float(m_OmmUpdateProgress) / float(m_OmmAlphaGeometry.size()));
+                    ImGui::ProgressBar(float(m_OmmUpdateProgress.load()) / float(m_OmmAlphaGeometry.size()));
             }
-            ++frameId;
         }
     }
     ImGui::PopID();

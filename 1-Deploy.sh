@@ -1,14 +1,10 @@
 #!/bin/sh
+set -e
+
+cd "$(dirname "$0")"
 
 git submodule update --init --recursive
 
-chmod +x "External/Packman/packman.sh"
-chmod +x "2-Build.sh"
-chmod +x "3-Prepare NRD SDK.sh"
-chmod +x "4-Clean.sh"
+chmod +x "External/Packman/packman.sh" "2-Build.sh" "4-Clean.sh"
 
-mkdir -p "_Build"
-
-cd "_Build"
-cmake ..
-cd ..
+cmake -S . -B _Build -G "Ninja Multi-Config" "$@"

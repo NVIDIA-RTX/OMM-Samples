@@ -208,6 +208,13 @@ void Sample::LatencySleep(uint32_t frameIndex) {
 void Sample::PrepareFrame(uint32_t frameIndex) {
     nri::nriBeginAnnotation("Prepare frame", nri::BGRA_UNUSED);
 
+#pragma region[ OmmSample specific ]
+    if (m_OmmUpdateTask.valid() && m_OmmUpdateTask.wait_for(std::chrono::microseconds(0)) == std::future_status::ready)
+        FinishOmmGeometryUpdate();
+    if (frameIndex == m_OmmBakeDesc.buildFrameId)
+        StartOmmGeometryUpdate(frameIndex);
+#pragma endregion
+
     m_ForceHistoryReset = false;
     m_SettingsPrev = m_Settings;
     m_Camera.SavePreviousState();
@@ -290,7 +297,7 @@ void Sample::PrepareFrame(uint32_t frameIndex) {
                 ImGui::Text("Accelerate - MOUSE SCROLL");
             } else {
                 ImGui::Checkbox("Show all settings", &m_ShowFullSettings);
-                AppendOmmImguiSettings();
+                AppendOmmImguiSettings(frameIndex);
                 if (m_ShowFullSettings) {
                     // "Camera" section
                     ImGui::PushStyleColor(ImGuiCol_Text, UI_HEADER);
@@ -708,35 +715,25 @@ void Sample::PrepareFrame(uint32_t frameIndex) {
                         ImGui::SameLine();
                         ImGui::PushStyleColor(ImGuiCol_Text, m_IsReloadShadersSucceeded ? UI_DEFAULT : UI_RED);
                         if (ImGui::Button("Reload shaders")) {
-                            std::string sampleShaders;
-
-                            bool isTool = std::string(STRINGIFY(SHADERMAKE_PATH)) == "ShaderMake";
-                            if (isTool) {
-#ifdef _DEBUG
-                                sampleShaders = "_Bin\\Debug\\ShaderMake.exe";
-#else
-                                sampleShaders = "_Bin\\Release\\ShaderMake.exe";
-#endif
-                            } else
-                                sampleShaders = STRINGIFY(SHADERMAKE_PATH);
+                            std::string sampleShaders = "\"" STRINGIFY(SHADERMAKE_PATH) "\"";
 
                             // clang-format off
                                 sampleShaders +=
                                     " --flatten --stripReflection --WX --colorize"
                                     " --sRegShift 0 --bRegShift 32 --uRegShift 64 --tRegShift 128"
                                     " --binary"
-                                    " --shaderModel 6_6"
+                                    " --shaderModel 6_9"
                                     " --sourceDir Shaders"
                                     " --ignoreConfigDir"
                                     " -c Shaders/Shaders.cfg"
                                     " -o _Shaders"
                                     " -I Shaders"
                                     " -I External"
-                                    " -I " STRINGIFY(ML_SOURCE_DIR)
-                            " -I " STRINGIFY(NRD_SOURCE_DIR)
-                            " -I " STRINGIFY(NRI_SOURCE_DIR)
-                                " -I " STRINGIFY(SHARC_SOURCE_DIR)
-                                " -I " STRINGIFY(RTXCR_SOURCE_DIR)
+                                    " -I \"" STRINGIFY(ML_SOURCE_DIR) "\""
+                                    " -I \"" STRINGIFY(NRD_SOURCE_DIR) "\""
+                                    " -I \"" STRINGIFY(NRI_SOURCE_DIR) "\""
+                                    " -I \"" STRINGIFY(SHARC_SOURCE_DIR) "\""
+                                    " -I \"" STRINGIFY(RTXCR_SOURCE_DIR) "\""
                                 " -D RTXCR_INTEGRATION=" STRINGIFY(RTXCR_INTEGRATION);
                             // clang-format on
 
@@ -746,6 +743,9 @@ void Sample::PrepareFrame(uint32_t frameIndex) {
                                 sampleShaders += " -p SPIRV --compiler \"" STRINGIFY(SHADERMAKE_DXC_VK_PATH) "\"";
 
                             printf("Compiling sample shaders...\n");
+#ifdef _WIN32
+                            sampleShaders = "\"" + sampleShaders + "\"";
+#endif
                             int32_t result = system(sampleShaders.c_str());
 #ifdef _WIN32
                             if (result)
@@ -1604,7 +1604,7 @@ void Sample::CreateAccelerationStructures() {
 
     nri::Buffer* scratchBuffer = nullptr;
     {
-        nri::BufferDesc bufferDesc = {scratchSize, 0, nri::BufferUsageBits::SCRATCH_BUFFER};
+        nri::BufferDesc bufferDesc = {scratchSize, 0, nri::BufferUsageBits::SCRATCH};
 
         NRI_ABORT_ON_FAILURE(NRI.CreateCommittedBuffer(*m_Device, nri::MemoryLocation::DEVICE, 0.0f, bufferDesc, scratchBuffer));
     }
@@ -1672,7 +1672,7 @@ void Sample::CreateAccelerationStructures() {
 
             // Emit sizes for compaction
             NRI.CmdResetQueries(*commandBuffer, *queryPool, 0, blasNum);
-            NRI.CmdWriteAccelerationStructuresSizes(*commandBuffer, blases.data(), blasNum, *queryPool, 0);
+            NRI.CmdWriteAccelerationStructureSizes(*commandBuffer, blases.data(), blasNum, *queryPool, 0);
             NRI.CmdCopyQueries(*commandBuffer, *queryPool, 0, blasNum, *readbackBuffer, 0);
         }
         NRI.EndCommandBuffer(*commandBuffer);
@@ -1866,8 +1866,8 @@ void Sample::CreateResourcesAndDescriptors(nri::Format swapChainFormat) {
     CreateBuffer(Buffer::SharcHashEntries, "SharcHashEntries", SHARC_CAPACITY, sizeof(uint64_t), nri::BufferUsageBits::SHADER_RESOURCE_STORAGE);
     CreateBuffer(Buffer::SharcAccumulated, "SharcAccumulated", SHARC_CAPACITY, sizeof(uint32_t) * 4, nri::BufferUsageBits::SHADER_RESOURCE_STORAGE);
     CreateBuffer(Buffer::SharcResolved, "SharcResolved", SHARC_CAPACITY, sizeof(uint32_t) * 4, nri::BufferUsageBits::SHADER_RESOURCE_STORAGE);
-    CreateBuffer(Buffer::WorldScratch, "WorldScratch", worldScratchBufferSize, 1, nri::BufferUsageBits::SCRATCH_BUFFER);
-    CreateBuffer(Buffer::LightScratch, "LightScratch", lightScratchBufferSize, 1, nri::BufferUsageBits::SCRATCH_BUFFER);
+    CreateBuffer(Buffer::WorldScratch, "WorldScratch", worldScratchBufferSize, 1, nri::BufferUsageBits::SCRATCH);
+    CreateBuffer(Buffer::LightScratch, "LightScratch", lightScratchBufferSize, 1, nri::BufferUsageBits::SCRATCH);
 
     // Textures
     CreateTexture(Texture::ViewZ, "ViewZ", nri::Format::R32_SFLOAT, w, h, 1, 1, false, nri::AccessBits::SHADER_RESOURCE);
@@ -1994,7 +1994,7 @@ void Sample::CreateDescriptorSets() {
     const nri::Descriptor* TraceOpaque_Textures[] = {
         GetDescriptor(Texture::ComposedDiff),
         GetDescriptor(Texture::ComposedSpec_ViewZ),
-        GetDescriptorForReadOnlyTexture(utils::StaticTexture::ScramblingRanking),
+        GetDescriptorForReadOnlyTexture(utils::StaticTexture::ScramblingRanking4),
         GetDescriptorForReadOnlyTexture(utils::StaticTexture::SobolSequence),
         };
 
@@ -2314,7 +2314,7 @@ void Sample::GatherInstanceData() {
         memcpy(topLevelInstance.transform, mCameraTranslation.a, sizeof(topLevelInstance.transform));
         topLevelInstance.instanceId = instanceIndex;
         topLevelInstance.mask = FLAG_NON_TRANSPARENT;
-        topLevelInstance.shaderBindingTableLocalOffset = 0;
+        topLevelInstance.shaderBindingTableRecordOffset = 0;
         topLevelInstance.flags = nri::TopLevelInstanceBits::TRIANGLE_CULL_DISABLE;
         topLevelInstance.accelerationStructureHandle = NRI.GetAccelerationStructureHandle(*Get(AccelerationStructure::BLAS_MergedOpaque));
 
@@ -2328,7 +2328,7 @@ void Sample::GatherInstanceData() {
         memcpy(topLevelInstance.transform, mCameraTranslation.a, sizeof(topLevelInstance.transform));
         topLevelInstance.instanceId = instanceIndex;
         topLevelInstance.mask = FLAG_TRANSPARENT;
-        topLevelInstance.shaderBindingTableLocalOffset = 0;
+        topLevelInstance.shaderBindingTableRecordOffset = 0;
         topLevelInstance.flags = nri::TopLevelInstanceBits::TRIANGLE_CULL_DISABLE;
         topLevelInstance.accelerationStructureHandle = NRI.GetAccelerationStructureHandle(*Get(AccelerationStructure::BLAS_MergedTransparent));
 
@@ -2342,7 +2342,7 @@ void Sample::GatherInstanceData() {
         memcpy(topLevelInstance.transform, mCameraTranslation.a, sizeof(topLevelInstance.transform));
         topLevelInstance.instanceId = instanceIndex;
         topLevelInstance.mask = FLAG_NON_TRANSPARENT;
-        topLevelInstance.shaderBindingTableLocalOffset = 0;
+        topLevelInstance.shaderBindingTableRecordOffset = 0;
         topLevelInstance.flags = nri::TopLevelInstanceBits::TRIANGLE_CULL_DISABLE;
         topLevelInstance.accelerationStructureHandle = NRI.GetAccelerationStructureHandle(*Get(AccelerationStructure::BLAS_MergedEmissive));
 
@@ -2471,7 +2471,7 @@ void Sample::GatherInstanceData() {
                 memcpy(topLevelInstance.transform, mObjectToWorld.a, sizeof(topLevelInstance.transform));
                 topLevelInstance.instanceId = instanceIndex++;
                 topLevelInstance.mask = flags;
-                topLevelInstance.shaderBindingTableLocalOffset = 0;
+                topLevelInstance.shaderBindingTableRecordOffset = 0;
                 topLevelInstance.flags = nri::TopLevelInstanceBits::TRIANGLE_CULL_DISABLE | (material.IsAlphaOpaque() ? nri::TopLevelInstanceBits::NONE : nri::TopLevelInstanceBits::FORCE_OPAQUE);
                 topLevelInstance.accelerationStructureHandle = NRI.GetAccelerationStructureHandle(*m_AccelerationStructures[meshInstance.blasIndex]);
 #pragma region[ OmmSample specific ]
@@ -2496,6 +2496,8 @@ void Sample::GatherInstanceData() {
         nri::StreamBufferDataDesc streamBufferDataDesc = {};
         streamBufferDataDesc.dataChunks = &dataChunk;
         streamBufferDataDesc.dataChunkNum = 1;
+        m_StreamerCopyBatch = NRI.BeginStreamerCopyBatch(*m_Streamer);
+        streamBufferDataDesc.copyBatch = m_StreamerCopyBatch;
         streamBufferDataDesc.dstBuffer = Get(Buffer::InstanceData);
 
         NRI.StreamBufferData(*m_Streamer, streamBufferDataDesc);
@@ -2593,7 +2595,7 @@ void Sample::UpdateConstantBuffer(uint32_t frameIndex, uint32_t maxAccumulatedFr
         constants.gWorldToViewPrev = m_Camera.statePrev.mWorldToView;
         constants.gWorldToClipPrev = m_Camera.statePrev.mWorldToClip;
         constants.gViewToWorldPrev = m_Camera.statePrev.mViewToWorld;
-        constants.gHitDistSettings = float4(hitDistanceParameters.A, hitDistanceParameters.B, hitDistanceParameters.C, hitDistanceParameters.D);
+        constants.gHitDistSettings = float4(hitDistanceParameters.A, hitDistanceParameters.B, hitDistanceParameters.C, 0.0f);
         constants.gCameraFrustum = frustum;
         constants.gSunBasisX = float4(sunT, 0.0f);
         constants.gSunBasisY = float4(sunB, 0.0f);
@@ -2789,7 +2791,7 @@ void Sample::RenderFrame(uint32_t frameIndex) {
             NRI.CmdBarrier(commandBuffer, barrierDesc);
             }
 
-        NRI.CmdCopyStreamedData(commandBuffer, *m_Streamer);
+        NRI.CmdCopyStreamedData(commandBuffer, *m_Streamer, m_StreamerCopyBatch);
     }
 
     { // TLAS and SHARC clear
@@ -3331,11 +3333,11 @@ void Sample::RenderFrame(uint32_t frameIndex) {
         renderingDesc.colors = &attachmentDesc;
         renderingDesc.colorNum = 1;
 
-        CmdCopyImguiData(commandBuffer, *m_Streamer);
+        const nri::ImguiRenderData imguiRenderData = CmdCopyImguiData(commandBuffer, *m_Streamer);
 
         NRI.CmdBeginRendering(commandBuffer, renderingDesc);
         {
-            CmdDrawImgui(commandBuffer, swapChainTexture.attachmentFormat, m_SdrScale, m_IsSrgb);
+            CmdDrawImgui(commandBuffer, imguiRenderData, swapChainTexture.attachmentFormat, m_SdrScale, m_IsSrgb);
         }
         NRI.CmdEndRendering(commandBuffer);
 
@@ -3382,7 +3384,7 @@ void Sample::RenderFrame(uint32_t frameIndex) {
     // Present
     nri::nriBeginAnnotation("Present", nri::BGRA_UNUSED);
     {
-        NRI.QueuePresent(*m_SwapChain, *swapChainTexture.releaseSemaphore);
+        NRI.QueuePresent(*m_SwapChain, *swapChainTexture.releaseSemaphore, uint64_t(frameIndex) + 1);
     }
     nri::nriEndAnnotation();
 

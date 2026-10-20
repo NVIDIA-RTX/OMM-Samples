@@ -84,13 +84,13 @@ void main( int2 pixelPos : SV_DispatchThreadId )
 
     // Decode SH mode outputs
     #if( NRD_MODE == SH )
-        NRD_SG diffSg = REBLUR_BackEnd_UnpackSh( diff, diff1 );
-        NRD_SG specSg = REBLUR_BackEnd_UnpackSh( spec, spec1 );
+        NRD_SG diffSg = REBLUR_BackEnd_UnpackSh( diff, diff1.xyz );
+        NRD_SG specSg = REBLUR_BackEnd_UnpackSh( spec, spec1.xyz );
 
         if( gDenoiserType == DENOISER_RELAX )
         {
-            diffSg = RELAX_BackEnd_UnpackSh( diff, diff1 );
-            specSg = RELAX_BackEnd_UnpackSh( spec, spec1 );
+            diffSg = RELAX_BackEnd_UnpackSh( diff, diff1.xyz );
+            specSg = RELAX_BackEnd_UnpackSh( spec, spec1.xyz );
         }
 
         // Regain macro-details

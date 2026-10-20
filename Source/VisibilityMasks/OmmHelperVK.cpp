@@ -9,6 +9,7 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 */
 
 #include <cassert>
+#include <cstdlib>
 #include "OmmHelper.h"
 
 #define VK_CALL(result) \

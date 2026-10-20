@@ -68,18 +68,18 @@ echo 5 - 1440p (ultra wide)
     goto CHOOSE_RESOLUTION
 
 :VSYNC
-set VSYNC=0
+set VSYNC=
 echo.
 echo 1 - off
 echo 2 - on
 :CHOOSE_VSYNC
     set /P M=Vsync [1-2]:
     if %M%==1 (
-        set VSYNC=0
+        set VSYNC=
         goto DLSS
     )
     if %M%==2 (
-        set VSYNC=1
+        set VSYNC=--vsync
         goto DLSS
     )
     goto CHOOSE_VSYNC
@@ -93,7 +93,7 @@ echo 3 - performance
 echo 4 - balanced
 echo 5 - quality
 :CHOOSE_DLSS
-    set /P M=DLSS mode [1-6]:
+    set /P M=DLSS mode [1-5]:
     if %M%==1 (
         set DLSS=-1
         goto SCENE
@@ -144,6 +144,6 @@ echo 4 - Kitchen
     goto CHOOSE_SCENE
 
 :RUN
-start "OMM sample" "%DIR_BIN%\OMMSample.exe" --width=%WIDTH% --height=%HEIGHT% --api=%API% --vsyncInterval=%VSYNC% --scene=%SCENE% --dlssQuality=%DLSS%
+start "OMM sample" "%DIR_BIN%\OMMSample.exe" --width=%WIDTH% --height=%HEIGHT% --api=%API% %VSYNC% --scene=%SCENE% --dlssQuality=%DLSS%
 
 exit /b

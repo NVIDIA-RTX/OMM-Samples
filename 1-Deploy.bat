@@ -1,9 +1,9 @@
 @echo off
+setlocal DisableDelayedExpansion
+for %%I in ("%~dp0.") do set "ROOT=%%~fI"
 
-git submodule update --init --recursive
+git -C "%ROOT%" submodule update --init --recursive
+if %ERRORLEVEL% NEQ 0 exit /B %ERRORLEVEL%
 
-mkdir "_Build"
-
-cd "_Build"
-cmake .. -A x64
-cd ..
+cmake -S "%ROOT%" -B "%ROOT%\_Build" %*
+exit /B %ERRORLEVEL%

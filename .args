@@ -59,24 +59,7 @@
       "Command": "VSYNC",
       "Items": [
         {
-          "Command": "--vsyncInterval=0"
-        },
-        {
-          "Command": "--vsyncInterval=1"
-        }
-      ]
-    },
-    {
-      "Command": "DPI",
-      "Items": [
-        {
-          "Command": "--dpiMode=0"
-        },
-        {
-          "Command": "--dpiMode=1"
-        },
-        {
-          "Command": "--dpiMode=2"
+          "Command": "--vsync"
         }
       ]
     },

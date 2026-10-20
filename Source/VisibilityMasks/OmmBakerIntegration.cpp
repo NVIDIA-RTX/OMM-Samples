@@ -9,6 +9,9 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 */
 
 #include "OmmBakerIntegration.h"
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 #define NRI_ABORT_ON_FAILURE(result) \
     if ((result) != nri::Result::SUCCESS) \
@@ -229,7 +232,7 @@ nri::BufferView GetNriBufferViewType(ommGpuDescriptorType type) {
         case ommGpuDescriptorType_RawBufferRead:
             return nri::BufferView::BYTE_ADDRESS_BUFFER;
         case ommGpuDescriptorType_RawBufferWrite:
-            return nri::BufferView::BYTE_ADDRESS_BUFFER;
+            return nri::BufferView::STORAGE_BYTE_ADDRESS_BUFFER;
         case ommGpuDescriptorType_TextureRead:
         default:
             printf("[FAIL] Invalid BufferDescriptorType\n");
@@ -523,7 +526,7 @@ void OmmBakerGpuIntegration::CreatePipelines(const ommGpuPipelineInfoDesc* pipel
 
 void OmmBakerGpuIntegration::CreateStaticResources(nri::Queue* commandQueue) {
     ommGpuResourceType staticResources[] = {ommGpuResourceType_STATIC_INDEX_BUFFER, ommGpuResourceType_STATIC_VERTEX_BUFFER};
-    nri::BufferUsageBits usageBits[] = {nri::BufferUsageBits::INDEX_BUFFER, nri::BufferUsageBits::VERTEX_BUFFER};
+    nri::BufferUsageBits usageBits[] = {nri::BufferUsageBits::INDEX, nri::BufferUsageBits::VERTEX};
     nri::AccessBits nexAccessBits[] = {nri::AccessBits::INDEX_BUFFER, nri::AccessBits::VERTEX_BUFFER};
     nri::BufferUploadDesc bufferUploadDescs[(uint32_t)GpuStaticResources::Count];
     std::vector<uint8_t> uploadData[(uint32_t)GpuStaticResources::Count];
@@ -657,7 +660,7 @@ void OmmBakerGpuIntegration::UpdateGlobalConstantBuffer() {
             NRI.DestroyBuffer(m_ConstantBuffer);
         nri::BufferDesc bufferDesc = {};
         bufferDesc.size = m_ConstantBufferSize;
-        bufferDesc.usage = nri::BufferUsageBits::CONSTANT_BUFFER;
+        bufferDesc.usage = nri::BufferUsageBits::CONSTANT;
         NRI_ABORT_ON_FAILURE(NRI.CreateBuffer(*m_Device, bufferDesc, m_ConstantBuffer));
 
         nri::ResourceGroupDesc resourceGroupDesc = {};
@@ -923,9 +926,9 @@ void OmmBakerGpuIntegration::DispatchCompute(nri::CommandBuffer& commandBuffer, 
     }
 
     nri::DispatchDesc dispatchDesc = {};
-    dispatchDesc.x = desc.gridWidth;
-    dispatchDesc.y = desc.gridHeight;
-    dispatchDesc.z = 1;
+    dispatchDesc.workGroupNumX = desc.gridWidth;
+    dispatchDesc.workGroupNumY = desc.gridHeight;
+    dispatchDesc.workGroupNumZ = 1;
     NRI.CmdDispatch(commandBuffer, dispatchDesc);
     InsertUavBarriers(commandBuffer, desc.resources, desc.resourceNum, geometryId);
 }
